@@ -4,6 +4,10 @@ const runtimeImportMeta = import.meta as ImportMeta & {
 };
 
 const configuredBaseUrl = (runtimeImportMeta.env?.VITE_API_BASE_URL ?? "").trim();
+const capacitorRuntime = (globalThis as typeof globalThis & {
+  Capacitor?: { isNativePlatform?: () => boolean };
+}).Capacitor;
+const isNativeApp = capacitorRuntime?.isNativePlatform?.() === true;
 // Cloudflare Pages serves the web app and `/api/*` through the same project.
 // This fallback is only used by a Capacitor build; web deployments remain
 // same-origin. It can be replaced at build time with VITE_API_BASE_URL.
@@ -12,7 +16,7 @@ const DEFAULT_MOBILE_API_BASE_URL = "https://note.221819.best";
 // versions used `capacitor://localhost`), so protocol detection is not safe.
 // The Pages custom domain also serves the web app, making this fallback valid
 // for both environments.
-export const API_BASE_URL = (configuredBaseUrl || DEFAULT_MOBILE_API_BASE_URL)
+export const API_BASE_URL = (configuredBaseUrl || (isNativeApp ? DEFAULT_MOBILE_API_BASE_URL : ""))
   .trim()
   .replace(/\/$/, "");
 

@@ -25,6 +25,7 @@ import {
   Menu,
   Network,
   MoreHorizontal,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -77,7 +78,15 @@ import { collectNoteComments } from "./comments";
 import { NoteIcon } from "./components/NoteIcon";
 import { isImageIcon, type EmojiItem } from "./emojiPacks";
 import { openExportWindow } from "./exportWindow";
-import type { AuthUser, Note, NoteBlock, NoteSummary, NoteTitleSize } from "./shared";
+import type {
+  AuthUser,
+  Note,
+  NoteBlock,
+  NoteSummary,
+  NoteTitleColor,
+  NoteTitleSegment,
+  NoteTitleSize
+} from "./shared";
 
 const AdminPanel = lazy(() =>
   import("./components/AdminPanel").then((module) => ({ default: module.AdminPanel }))
@@ -154,7 +163,7 @@ type DragAutoScrollState = {
   lastFrameAt: number | null;
 };
 
-type PageSnapshot = Pick<Note, "title" | "icon" | "titleSize" | "content">;
+type PageSnapshot = Pick<Note, "title" | "icon" | "titleSize" | "titleSegments" | "content">;
 
 type PageHistoryState = {
   noteId: string | null;
@@ -218,6 +227,22 @@ const PAGE_TITLE_SIZE_OPTIONS: Array<{ label: string; value: NoteTitleSize }> = 
   { label: "一级标题", value: "h1" },
   { label: "二级标题", value: "h2" },
   { label: "三级标题", value: "h3" }
+];
+const PAGE_TITLE_COLOR_OPTIONS: Array<{
+  color: string;
+  label: string;
+    value: NoteTitleColor;
+}> = [
+  { color: "#171716", label: "默认", value: "default" },
+  { color: "#9b9a97", label: "灰色", value: "gray" },
+  { color: "#64473a", label: "棕色", value: "brown" },
+  { color: "#e03e3e", label: "红色", value: "red" },
+  { color: "#d9730d", label: "橙色", value: "orange" },
+  { color: "#c99600", label: "黄色", value: "yellow" },
+  { color: "#4d6461", label: "绿色", value: "green" },
+  { color: "#0b6e99", label: "蓝色", value: "blue" },
+  { color: "#6940a5", label: "紫色", value: "purple" },
+  { color: "#ad1a72", label: "粉色", value: "pink" }
 ];
 
 /*
@@ -304,6 +329,9 @@ function App() {
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [editorFocusRequest, setEditorFocusRequest] = useState(0);
   const [editorDocumentVersion, setEditorDocumentVersion] = useState(0);
+  const [hasTitleSelection, setHasTitleSelection] = useState(false);
+  const [selectedTitleColor, setSelectedTitleColor] = useState<NoteTitleColor | null>(null);
+  const [titleColorMenuOpen, setTitleColorMenuOpen] = useState(false);
   const [publicNote, setPublicNote] = useState<Note | null>(null);
   const [publicPending, setPublicPending] = useState(isPublicView);
   const [publicError, setPublicError] = useState<string | null>(null);
@@ -335,6 +363,9 @@ function App() {
   const publicNoteRequestRef = useRef(0);
   const selectedIdRef = useRef<string | null>(null);
   const draftRef = useRef<Note | null>(null);
+  const titleInputRef = useRef<HTMLDivElement | null>(null);
+  const titleSelectionRef = useRef<{ end: number; start: number } | null>(null);
+  const titleDomSignatureRef = useRef("");
   const lastPageSnapshotRef = useRef<PageSnapshot | null>(null);
   const pageHistoryRef = useRef<PageHistoryState>(createEmptyPageHistory(null));
   const authUsernameInputRef = useRef<HTMLInputElement | null>(null);
@@ -838,6 +869,7 @@ function App() {
       draft?.shareToken,
       draft?.sortOrder,
       draft?.title,
+      draft?.titleSegments,
       draft?.titleSize,
       draft?.updatedAt
     ]
@@ -1125,6 +1157,7 @@ function App() {
               title: queuedSnapshot.title,
               icon: queuedSnapshot.icon,
               titleSize: queuedSnapshot.titleSize,
+              titleSegments: queuedSnapshot.titleSegments,
               content: queuedSnapshot.content
             })
           );
@@ -1294,6 +1327,7 @@ function App() {
         patch.title !== undefined ||
         patch.icon !== undefined ||
         patch.titleSize !== undefined ||
+        patch.titleSegments !== undefined ||
         patch.parentId !== undefined
       ) {
         setNotes((current) =>
@@ -1304,6 +1338,7 @@ function App() {
                   title: nextDraft.title,
                   icon: nextDraft.icon,
                   titleSize: nextDraft.titleSize,
+                  titleSegments: nextDraft.titleSegments,
                   parentId: nextDraft.parentId
                 }
               : note
@@ -1312,6 +1347,77 @@ function App() {
       }
     },
     [pushPageHistorySnapshot]
+  );
+
+  useEffect(() => {
+    const editor = titleInputRef.current;
+    if (!editor || !draft) return;
+    const segments = normalizeTitleSegments(draft.titleSegments, draft.title);
+    const signature = JSON.stringify(segments);
+    if (signature === titleDomSignatureRef.current) return;
+    writeTitleSegments(editor, segments);
+    titleDomSignatureRef.current = signature;
+  }, [draft?.id, draft?.title, draft?.titleSegments]);
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const editor = titleInputRef.current;
+      if (!editor) return;
+      const selection = readTitleSelection(editor);
+      titleSelectionRef.current = selection;
+      setHasTitleSelection(Boolean(selection));
+      if (!selection) setTitleColorMenuOpen(false);
+      setSelectedTitleColor(
+        selection && draftRef.current
+          ? getTitleSelectionColor(
+              normalizeTitleSegments(draftRef.current.titleSegments, draftRef.current.title),
+              selection.start,
+              selection.end
+            )
+          : null
+      );
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, []);
+
+  const handleTitleInput = useCallback(
+    (element: HTMLDivElement) => {
+      let segments = readTitleSegments(element);
+      const fullText = segments.map((segment) => segment.text).join("");
+      if (fullText.length > 120) {
+        segments = truncateTitleSegments(segments, 120);
+        writeTitleSegments(element, segments);
+        placeTitleCaret(element, segments.map((segment) => segment.text).join("").length);
+      }
+      const title = segments.map((segment) => segment.text).join("");
+      titleDomSignatureRef.current = JSON.stringify(segments);
+      editDraft({ title, titleSegments: segments });
+    },
+    [editDraft]
+  );
+
+  const applySelectedTitleColor = useCallback(
+    (color: NoteTitleColor) => {
+      const editor = titleInputRef.current;
+      const selection = titleSelectionRef.current;
+      const currentDraft = draftRef.current;
+      if (!editor || !selection || !currentDraft) return;
+      const nextSegments = colorTitleRange(
+        normalizeTitleSegments(currentDraft.titleSegments, currentDraft.title),
+        selection.start,
+        selection.end,
+        color
+      );
+      writeTitleSegments(editor, nextSegments);
+      restoreTitleSelection(editor, selection.start, selection.end);
+      titleDomSignatureRef.current = JSON.stringify(nextSegments);
+      setSelectedTitleColor(color);
+      setTitleColorMenuOpen(false);
+      editDraft({ titleSegments: nextSegments });
+    },
+    [editDraft]
   );
 
   const syncParentPageLink = useCallback(
@@ -2446,6 +2552,7 @@ function App() {
           icon: "📝",
           kind: "page",
           titleSize: DEFAULT_TITLE_SIZE,
+          titleSegments: [{ text: "未命名", color: "default" }],
           parentId,
           content: []
         })
@@ -2485,6 +2592,7 @@ function App() {
             icon: "📝",
             kind: "page",
             titleSize: DEFAULT_TITLE_SIZE,
+            titleSegments: [{ text: "未命名", color: "default" }],
             parentId,
             content: []
           })
@@ -4034,7 +4142,13 @@ function App() {
             <div className="public-note-head">
               {publicNote.kind === "category" ? <span className="public-note-icon public-folder-icon" aria-hidden="true"><Folder size={30} /></span> : <NoteIcon className="public-note-icon" icon={normalizePageIcon(publicNote.icon)} />}
               <div className="public-note-copy">
-                <h1 className={`title-size-${publicNote.titleSize}`}>{publicNote.title}</h1>
+                <h1 className={`title-size-${publicNote.titleSize}`}>
+                  {normalizeTitleSegments(publicNote.titleSegments, publicNote.title).map((segment, index) => (
+                    <span className={`title-color-${segment.color}`} key={`${index}:${segment.text}`}>
+                      {segment.text}
+                    </span>
+                  ))}
+                </h1>
                 {publicNote.kind === "category" ? <p className="public-folder-subtitle">文件夹 · {publicNote.children?.length ?? 0} 个项目</p> : null}
               </div>
             </div>
@@ -5057,42 +5171,103 @@ function App() {
             <div className="page-heading-layout">
               <div className="page-heading-main">
                 <div className="page-meta">
-                  <div className="page-meta-field">
-                    <span className="page-meta-label">页面图标</span>
-                    <button
-                      className="page-icon-picker-button"
-                      onClick={() => setPageIconPickerTargetId(draft.id)}
-                      type="button"
-                    >
-                      <NoteIcon className="page-icon-picker-button__icon" icon={normalizePageIcon(draft.icon)} />
-                      <span>更换图标</span>
-                    </button>
+                  <button
+                    aria-label="更换页面图标"
+                    className="page-meta-icon-button"
+                    onClick={() => setPageIconPickerTargetId(draft.id)}
+                    title="更换页面图标"
+                    type="button"
+                  >
+                    <NoteIcon icon={normalizePageIcon(draft.icon)} />
+                  </button>
+
+                  <span className="page-meta-divider" aria-hidden="true" />
+
+                  <div className="page-title-size-options" role="group" aria-label="标题大小">
+                    {PAGE_TITLE_SIZE_OPTIONS.map((option) => (
+                      <button
+                        aria-label={option.label}
+                        aria-pressed={draft.titleSize === option.value}
+                        className={clsx(
+                          "page-title-size-option",
+                          draft.titleSize === option.value && "active"
+                        )}
+                        key={option.value}
+                        onClick={() => editDraft({ titleSize: option.value })}
+                        title={option.label}
+                        type="button"
+                      >
+                        {option.value.toUpperCase()}
+                      </button>
+                    ))}
                   </div>
 
-                  <div className="page-meta-field">
-                    <span className="page-meta-label">标题大小</span>
-                    <div className="page-title-size-options" role="group" aria-label="标题大小">
-                      {PAGE_TITLE_SIZE_OPTIONS.map((option) => (
-                        <button
-                          aria-pressed={draft.titleSize === option.value}
-                          className={clsx(
-                            "page-title-size-option",
-                            draft.titleSize === option.value && "active"
-                          )}
-                          key={option.value}
-                          onClick={() => editDraft({ titleSize: option.value })}
-                          type="button"
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
+                  <span className="page-meta-divider" aria-hidden="true" />
+
+                  <div className="page-title-color-control">
+                    <button
+                      aria-expanded={titleColorMenuOpen}
+                      aria-haspopup="true"
+                      aria-label="修改选中的标题文字颜色"
+                      className="page-meta-color-button"
+                      disabled={!hasTitleSelection}
+                      onClick={() => setTitleColorMenuOpen((current) => !current)}
+                      onMouseDown={(event) => event.preventDefault()}
+                      title={hasTitleSelection ? "文字颜色" : "请先选中标题文字"}
+                      type="button"
+                    >
+                      <Palette size={17} />
+                      <span
+                        className="page-meta-color-indicator"
+                        style={{
+                          "--title-color-swatch": PAGE_TITLE_COLOR_OPTIONS.find(
+                            (option) => option.value === selectedTitleColor
+                          )?.color ?? "#171716"
+                        } as CSSProperties}
+                      />
+                    </button>
+
+                    {titleColorMenuOpen ? (
+                      <div className="page-title-color-popover" role="group" aria-label="标题颜色">
+                        {PAGE_TITLE_COLOR_OPTIONS.map((option) => (
+                          <button
+                            aria-label={`${option.label}标题`}
+                            aria-pressed={selectedTitleColor === option.value}
+                            className={clsx(
+                              "page-title-color-option",
+                              selectedTitleColor === option.value && "active"
+                            )}
+                            data-title-color={option.value}
+                            key={option.value}
+                            onClick={() => applySelectedTitleColor(option.value)}
+                            onMouseDown={(event) => event.preventDefault()}
+                            style={{ "--title-color-swatch": option.color } as CSSProperties}
+                            title={option.label}
+                            type="button"
+                          >
+                            {selectedTitleColor === option.value ? <Check size={13} strokeWidth={3} /> : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
-                <input
-                  className={clsx("title-input", `title-size-${draft.titleSize}`)}
-                  onChange={(event) => editDraft({ title: event.target.value })}
+                <div
+                  aria-label="页面标题"
+                  className={clsx(
+                    "title-input",
+                    `title-size-${draft.titleSize}`
+                  )}
+                  contentEditable
+                  data-placeholder="未命名"
+                  onBeforeInput={(event) => {
+                    if (event.nativeEvent.inputType === "insertParagraph") {
+                      event.preventDefault();
+                      setEditorFocusRequest((current) => current + 1);
+                    }
+                  }}
+                  onInput={(event) => handleTitleInput(event.currentTarget)}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" || event.nativeEvent.isComposing) {
                       return;
@@ -5101,8 +5276,10 @@ function App() {
                     event.preventDefault();
                     setEditorFocusRequest((current) => current + 1);
                   }}
-                  placeholder="未命名"
-                  value={draft.title}
+                  ref={titleInputRef}
+                  role="textbox"
+                  spellCheck
+                  suppressContentEditableWarning
                 />
               </div>
             </div>
@@ -5197,11 +5374,14 @@ function createEmptyPageHistory(noteId: string | null): PageHistoryState {
   };
 }
 
-function clonePageSnapshot(note: Pick<Note, "title" | "icon" | "titleSize" | "content">): PageSnapshot {
+function clonePageSnapshot(
+  note: Pick<Note, "title" | "icon" | "titleSize" | "titleSegments" | "content">
+): PageSnapshot {
   return {
     title: note.title,
     icon: note.icon,
     titleSize: normalizeTitleSize(note.titleSize),
+    titleSegments: normalizeTitleSegments(note.titleSegments, note.title),
     content: cloneNoteBlocks(note.content)
   };
 }
@@ -5212,6 +5392,7 @@ function applyPageSnapshotToNote(note: Note, snapshot: PageSnapshot): Note {
     title: snapshot.title,
     icon: snapshot.icon,
     titleSize: snapshot.titleSize,
+    titleSegments: snapshot.titleSegments.map((segment) => ({ ...segment })),
     content: cloneNoteBlocks(snapshot.content)
   };
 }
@@ -5345,6 +5526,7 @@ function arePageSnapshotsEqual(first: PageSnapshot, second: PageSnapshot): boole
     first.title === second.title &&
     first.icon === second.icon &&
     first.titleSize === second.titleSize &&
+    JSON.stringify(first.titleSegments) === JSON.stringify(second.titleSegments) &&
     JSON.stringify(first.content) === JSON.stringify(second.content)
   );
 }
@@ -5362,27 +5544,192 @@ function normalizeLegacyTitle(title: string): string {
 }
 
 function normalizeNoteSummary(note: NoteSummary): NoteSummary {
+  const title = normalizeLegacyTitle(note.title);
   return {
     ...note,
     kind: note.kind === "category" ? "category" : "page",
-    title: normalizeLegacyTitle(note.title),
+    title,
     icon: normalizePageIcon(note.icon),
-    titleSize: normalizeTitleSize(note.titleSize)
+    titleSize: normalizeTitleSize(note.titleSize),
+    titleSegments: normalizeTitleSegments(note.titleSegments, title)
   };
 }
 
 function normalizeNote(note: Note): Note {
+  const title = normalizeLegacyTitle(note.title);
   return {
     ...note,
     kind: note.kind === "category" ? "category" : "page",
-    title: normalizeLegacyTitle(note.title),
+    title,
     icon: normalizePageIcon(note.icon),
-    titleSize: normalizeTitleSize(note.titleSize)
+    titleSize: normalizeTitleSize(note.titleSize),
+    titleSegments: normalizeTitleSegments(note.titleSegments, title)
   };
 }
 
 function normalizeTitleSize(value: unknown): NoteTitleSize {
   return value === "h2" || value === "h3" ? value : DEFAULT_TITLE_SIZE;
+}
+
+function normalizeTitleColor(value: unknown): NoteTitleColor {
+  return PAGE_TITLE_COLOR_OPTIONS.some((option) => option.value === value)
+    ? (value as NoteTitleColor)
+    : "default";
+}
+
+function normalizeTitleSegments(value: unknown, title: string): NoteTitleSegment[] {
+  if (!Array.isArray(value)) {
+    return title ? [{ text: title, color: "default" }] : [];
+  }
+  const segments = mergeTitleSegments(
+    value.map((segment) => {
+      if (!segment || typeof segment !== "object") return null;
+      const candidate = segment as Record<string, unknown>;
+      return typeof candidate.text === "string" && candidate.text
+        ? { text: candidate.text, color: normalizeTitleColor(candidate.color) }
+        : null;
+    }).filter((segment): segment is NoteTitleSegment => Boolean(segment))
+  );
+  return segments.map((segment) => segment.text).join("") === title
+    ? segments
+    : title
+      ? [{ text: title, color: "default" }]
+      : [];
+}
+
+function mergeTitleSegments(segments: NoteTitleSegment[]): NoteTitleSegment[] {
+  return segments.reduce<NoteTitleSegment[]>((merged, segment) => {
+    if (!segment.text) return merged;
+    const previous = merged.at(-1);
+    if (previous?.color === segment.color) previous.text += segment.text;
+    else merged.push({ ...segment });
+    return merged;
+  }, []);
+}
+
+function truncateTitleSegments(segments: NoteTitleSegment[], limit: number): NoteTitleSegment[] {
+  const result: NoteTitleSegment[] = [];
+  let remaining = limit;
+  for (const segment of segments) {
+    if (remaining <= 0) break;
+    const text = segment.text.slice(0, remaining);
+    if (text) result.push({ ...segment, text });
+    remaining -= text.length;
+  }
+  return mergeTitleSegments(result);
+}
+
+function readTitleSegments(element: HTMLDivElement): NoteTitleSegment[] {
+  const segments: NoteTitleSegment[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const text = node.textContent ?? "";
+    if (text) {
+      const colorNode = node.parentElement?.closest<HTMLElement>("[data-title-color]");
+      segments.push({ text, color: normalizeTitleColor(colorNode?.dataset.titleColor) });
+    }
+    node = walker.nextNode();
+  }
+  return mergeTitleSegments(segments);
+}
+
+function writeTitleSegments(element: HTMLDivElement, segments: NoteTitleSegment[]): void {
+  const nodes = segments.map((segment) => {
+    const span = document.createElement("span");
+    span.className = `title-color-${segment.color}`;
+    span.dataset.titleColor = segment.color;
+    span.textContent = segment.text;
+    return span;
+  });
+  element.replaceChildren(...nodes);
+}
+
+function readTitleSelection(element: HTMLDivElement): { end: number; start: number } | null {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (range.collapsed || !element.contains(range.commonAncestorContainer)) return null;
+  const prefix = range.cloneRange();
+  prefix.selectNodeContents(element);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const start = prefix.toString().length;
+  return { start, end: start + range.toString().length };
+}
+
+function restoreTitleSelection(element: HTMLDivElement, start: number, end: number): void {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  let offset = 0;
+  let startPoint: { node: Node; offset: number } | null = null;
+  let endPoint: { node: Node; offset: number } | null = null;
+  while (node) {
+    const length = node.textContent?.length ?? 0;
+    if (!startPoint && start <= offset + length) startPoint = { node, offset: start - offset };
+    if (!endPoint && end <= offset + length) {
+      endPoint = { node, offset: end - offset };
+      break;
+    }
+    offset += length;
+    node = walker.nextNode();
+  }
+  if (!startPoint || !endPoint) return;
+  const range = document.createRange();
+  range.setStart(startPoint.node, startPoint.offset);
+  range.setEnd(endPoint.node, endPoint.offset);
+  const selection = document.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  element.focus();
+}
+
+function placeTitleCaret(element: HTMLDivElement, offset: number): void {
+  restoreTitleSelection(element, offset, offset);
+}
+
+function colorTitleRange(
+  segments: NoteTitleSegment[],
+  start: number,
+  end: number,
+  color: NoteTitleColor
+): NoteTitleSegment[] {
+  const result: NoteTitleSegment[] = [];
+  let offset = 0;
+  for (const segment of segments) {
+    const segmentEnd = offset + segment.text.length;
+    if (segmentEnd <= start || offset >= end) {
+      result.push({ ...segment });
+      offset = segmentEnd;
+      continue;
+    }
+    const selectedStart = Math.max(start, offset);
+    const selectedEnd = Math.min(end, segmentEnd);
+    if (selectedStart > offset) result.push({ ...segment, text: segment.text.slice(0, selectedStart - offset) });
+    if (selectedEnd > selectedStart) {
+      result.push({ text: segment.text.slice(selectedStart - offset, selectedEnd - offset), color });
+    }
+    if (selectedEnd < segmentEnd) {
+      result.push({ ...segment, text: segment.text.slice(Math.max(0, selectedEnd - offset)) });
+    }
+    offset = segmentEnd;
+  }
+  return mergeTitleSegments(result);
+}
+
+function getTitleSelectionColor(
+  segments: NoteTitleSegment[],
+  start: number,
+  end: number
+): NoteTitleColor | null {
+  let offset = 0;
+  let color: NoteTitleColor | null = null;
+  for (const segment of segments) {
+    const overlaps = start < offset + segment.text.length && end > offset;
+    if (overlaps && color && color !== segment.color) return null;
+    if (overlaps) color = segment.color;
+    offset += segment.text.length;
+  }
+  return color;
 }
 
 function toSummary(note: Note): NoteSummary {

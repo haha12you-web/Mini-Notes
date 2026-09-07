@@ -18,6 +18,8 @@ import type {
   NoteMoveInput,
   NoteMoveResult,
   NoteSummary,
+  NoteTitleColor,
+  NoteTitleSegment,
   NoteTitleSize,
   NoteUpdateInput,
   RegisterInput,
@@ -62,6 +64,7 @@ type DbNoteRow = {
   icon: string;
   kind: NoteKind;
   titleSize: NoteTitleSize;
+  titleSegments: string;
   parentId: string | null;
   isArchived: number;
   shareToken: string | null;
@@ -194,9 +197,9 @@ type UploadedFormFile = Blob & {
 };
 
 const NOTE_COLUMNS =
-  "id, title, icon, kind, title_size AS titleSize, parent_id AS parentId, is_archived AS isArchived, share_token AS shareToken, shared_at AS sharedAt, share_password_salt AS sharePasswordSalt, share_password_hash AS sharePasswordHash, sort_order AS sortOrder, summary, created_at AS createdAt, updated_at AS updatedAt, content_key AS contentKey, content_size AS contentSize";
+  "id, title, icon, kind, title_size AS titleSize, title_segments AS titleSegments, parent_id AS parentId, is_archived AS isArchived, share_token AS shareToken, shared_at AS sharedAt, share_password_salt AS sharePasswordSalt, share_password_hash AS sharePasswordHash, sort_order AS sortOrder, summary, created_at AS createdAt, updated_at AS updatedAt, content_key AS contentKey, content_size AS contentSize";
 const QUALIFIED_NOTE_COLUMNS =
-  "notes.id, notes.title, notes.icon, notes.kind, notes.title_size AS titleSize, notes.parent_id AS parentId, notes.is_archived AS isArchived, notes.share_token AS shareToken, notes.shared_at AS sharedAt, notes.share_password_salt AS sharePasswordSalt, notes.share_password_hash AS sharePasswordHash, notes.sort_order AS sortOrder, notes.summary, notes.created_at AS createdAt, notes.updated_at AS updatedAt, notes.content_key AS contentKey, notes.content_size AS contentSize";
+  "notes.id, notes.title, notes.icon, notes.kind, notes.title_size AS titleSize, notes.title_segments AS titleSegments, notes.parent_id AS parentId, notes.is_archived AS isArchived, notes.share_token AS shareToken, notes.shared_at AS sharedAt, notes.share_password_salt AS sharePasswordSalt, notes.share_password_hash AS sharePasswordHash, notes.sort_order AS sortOrder, notes.summary, notes.created_at AS createdAt, notes.updated_at AS updatedAt, notes.content_key AS contentKey, notes.content_size AS contentSize";
 
 let bibleDataPromise: Promise<BibleData> | null = null;
 let emojiIndexPromise: Promise<string> | null = null;
@@ -2796,6 +2799,7 @@ async function createNote(
     icon: cleanIcon(body.icon, kind),
     kind,
     titleSize: cleanTitleSize(body.titleSize),
+    titleSegments: cleanTitleSegments(body.titleSegments, cleanTitle(body.title, kind)),
     parentId: await resolveParentIdForUser(env, userId, kind, body.parentId),
     isArchived: false,
     shareToken: null,
@@ -2809,8 +2813,8 @@ async function createNote(
 
   await env.DB.prepare(
     `INSERT INTO notes
-       (id, user_id, title, icon, kind, title_size, parent_id, content, content_key, content_size, summary, is_archived, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+       (id, user_id, title, icon, kind, title_size, title_segments, parent_id, content, content_key, content_size, summary, is_archived, sort_order, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
   )
     .bind(
       note.id,
@@ -2819,6 +2823,7 @@ async function createNote(
       note.icon,
       note.kind,
       note.titleSize,
+      JSON.stringify(note.titleSegments),
       note.parentId,
       storedContent.dbContent,
       storedContent.contentKey,
@@ -2882,6 +2887,10 @@ async function updateNote(
       body.titleSize === undefined
         ? cleanTitleSize(current.titleSize)
         : cleanTitleSize(body.titleSize),
+    titleSegments:
+      body.titleSegments === undefined
+        ? cleanTitleSegments(current.titleSegments, body.title === undefined ? current.title : cleanTitle(body.title, currentKind))
+        : cleanTitleSegments(body.titleSegments, body.title === undefined ? current.title : cleanTitle(body.title, currentKind)),
     parentId:
       body.parentId === undefined
         ? current.parentId
@@ -2910,6 +2919,7 @@ async function updateNote(
        SET title = ?,
            icon = ?,
            title_size = ?,
+           title_segments = ?,
            parent_id = CASE WHEN ? = 1 THEN ? ELSE parent_id END,
            content = ?,
            content_key = ?,
@@ -2927,6 +2937,7 @@ async function updateNote(
         next.title,
         next.icon,
         next.titleSize,
+        JSON.stringify(next.titleSegments),
         body.parentId === undefined ? 0 : 1,
         next.parentId,
         storedContent.dbContent,
@@ -2978,6 +2989,7 @@ async function updateNote(
        SET title = ?,
            icon = ?,
            title_size = ?,
+           title_segments = ?,
            parent_id = CASE WHEN ? = 1 THEN ? ELSE parent_id END,
            is_archived = ?,
            sort_order = CASE WHEN ? = 1 THEN ? ELSE sort_order END,
@@ -2990,6 +3002,7 @@ async function updateNote(
         next.title,
         next.icon,
         next.titleSize,
+        JSON.stringify(next.titleSegments),
         body.parentId === undefined ? 0 : 1,
         next.parentId,
         next.isArchived ? 1 : 0,
@@ -3883,6 +3896,7 @@ function rowToSummary(row: DbNoteRow): NoteSummary {
     icon: row.icon,
     kind: cleanNoteKind(row.kind),
     titleSize: cleanTitleSize(row.titleSize),
+    titleSegments: cleanTitleSegments(row.titleSegments, row.title),
     parentId: row.parentId,
     isArchived: Boolean(row.isArchived),
     shareToken: row.shareToken ?? null,
@@ -4661,6 +4675,58 @@ function cleanNoteKind(value: unknown): NoteKind {
 
 function cleanTitleSize(value: unknown): NoteTitleSize {
   return value === "h2" || value === "h3" ? value : "h1";
+}
+
+function cleanTitleColor(value: unknown): NoteTitleColor {
+  return value === "gray" ||
+    value === "brown" ||
+    value === "red" ||
+    value === "orange" ||
+    value === "yellow" ||
+    value === "green" ||
+    value === "blue" ||
+    value === "purple" ||
+    value === "pink"
+    ? value
+    : "default";
+}
+
+function cleanTitleSegments(value: unknown, title: string): NoteTitleSegment[] {
+  let segments = value;
+  if (typeof value === "string") {
+    try {
+      segments = JSON.parse(value) as unknown;
+    } catch {
+      segments = [];
+    }
+  }
+
+  if (!Array.isArray(segments)) {
+    return title ? [{ text: title, color: "default" }] : [];
+  }
+
+  const cleaned: NoteTitleSegment[] = [];
+  let remaining = 120;
+  for (const segment of segments.slice(0, 120)) {
+    if (!segment || typeof segment !== "object" || remaining <= 0) continue;
+    const candidate = segment as Record<string, unknown>;
+    const text = typeof candidate.text === "string" ? candidate.text.slice(0, remaining) : "";
+    if (!text) continue;
+    const color = cleanTitleColor(candidate.color);
+    const previous = cleaned.at(-1);
+    if (previous?.color === color) {
+      previous.text += text;
+    } else {
+      cleaned.push({ text, color });
+    }
+    remaining -= text.length;
+  }
+
+  return cleaned.map((segment) => segment.text).join("") === title
+    ? cleaned
+    : title
+      ? [{ text: title, color: "default" }]
+      : [];
 }
 
 function cleanParentId(value: unknown): string | null {
@@ -5812,28 +5878,32 @@ function buildSessionCookie(
   token: string,
   expiresAt: Date
 ): string {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  const isSecureRequest = new URL(request.url).protocol === "https:";
+  const sameSite = isSecureRequest ? "None" : "Lax";
+  const secure = isSecureRequest ? "; Secure" : "";
 
   return [
     `${SESSION_COOKIE_NAME}=${token}`,
     "HttpOnly",
     "Path=/",
-    // Capacitor runs the UI on a different origin than the Worker. None is
-    // required for the session cookie to be sent by the Android WebView.
-    "SameSite=None",
+    // Capacitor needs None over HTTPS; local HTTP requires Lax because
+    // browsers reject SameSite=None cookies without the Secure attribute.
+    `SameSite=${sameSite}`,
     `Expires=${expiresAt.toUTCString()}`,
     `Max-Age=${SESSION_TTL_SECONDS}${secure}`
   ].join("; ");
 }
 
 function clearSessionCookie(request: Request): string {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  const isSecureRequest = new URL(request.url).protocol === "https:";
+  const sameSite = isSecureRequest ? "None" : "Lax";
+  const secure = isSecureRequest ? "; Secure" : "";
 
   return [
     `${SESSION_COOKIE_NAME}=`,
     "HttpOnly",
     "Path=/",
-    "SameSite=None",
+    `SameSite=${sameSite}`,
     "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
     `Max-Age=0${secure}`
   ].join("; ");

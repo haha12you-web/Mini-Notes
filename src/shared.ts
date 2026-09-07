@@ -4,6 +4,23 @@ export type NoteKind = "page" | "category";
 
 export type NoteTitleSize = "h1" | "h2" | "h3";
 
+export type NoteTitleColor =
+  | "default"
+  | "gray"
+  | "brown"
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "pink";
+
+export type NoteTitleSegment = {
+  text: string;
+  color: NoteTitleColor;
+};
+
 export type AuthUser = {
   id: string;
   username: string;
@@ -16,6 +33,7 @@ export type NoteSummary = {
   icon: string;
   kind: NoteKind;
   titleSize: NoteTitleSize;
+  titleSegments: NoteTitleSegment[];
   parentId: string | null;
   isArchived: boolean;
   shareToken: string | null;
@@ -58,6 +76,7 @@ export type NoteCreateInput = {
   icon?: string;
   kind?: NoteKind;
   titleSize?: NoteTitleSize;
+  titleSegments?: NoteTitleSegment[];
   parentId?: string | null;
   sortOrder?: number;
   content?: NoteBlock[];
@@ -67,6 +86,7 @@ export type NoteUpdateInput = {
   title?: string;
   icon?: string;
   titleSize?: NoteTitleSize;
+  titleSegments?: NoteTitleSegment[];
   parentId?: string | null;
   sortOrder?: number;
   content?: NoteBlock[];

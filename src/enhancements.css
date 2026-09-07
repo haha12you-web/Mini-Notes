@@ -438,6 +438,55 @@
   box-shadow: inset 0 0 0 1px rgba(47, 111, 115, 0.22);
 }
 
+.page-title-color-options {
+  display: grid;
+  grid-template-columns: repeat(5, 28px);
+  gap: 4px;
+  width: fit-content;
+  padding: 4px;
+  border: 1px solid #ddd7ca;
+  border-radius: 10px;
+  background: #fbfaf7;
+}
+
+.page-title-color-option {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: #ffffff;
+  background: var(--title-color-swatch);
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 33, 0.12);
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+
+.page-title-color-option:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 0 0 1px rgba(31, 35, 33, 0.16),
+    0 3px 8px rgba(31, 35, 33, 0.15);
+}
+
+.page-title-color-option.active {
+  box-shadow:
+    inset 0 0 0 2px #ffffff,
+    0 0 0 2px #2f6f73;
+}
+
+.page-title-color-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+  transform: none;
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 33, 0.12);
+}
+
+.page-title-color-option[data-title-color="yellow"] {
+  color: #4c3a00;
+}
+
 .page-category-select {
   min-height: 40px;
   width: min(240px, 100%);

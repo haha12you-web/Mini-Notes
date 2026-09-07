@@ -1,9 +1,12 @@
 import { BlockNoteEditor } from "@blocknote/core";
 import { isImageIcon } from "./emojiPacks";
 import { noteSchema } from "./editorSchema";
-import type { Note, NoteTitleSize } from "./shared";
+import type { Note, NoteTitleColor, NoteTitleSegment, NoteTitleSize } from "./shared";
 
-type ExportableNote = Pick<Note, "content" | "icon" | "title" | "titleSize" | "updatedAt">;
+type ExportableNote = Pick<
+  Note,
+  "content" | "icon" | "title" | "titleSegments" | "titleSize" | "updatedAt"
+>;
 type ExportEditor = BlockNoteEditor<any, any, any>;
 
 let exportEditor: ExportEditor | null = null;
@@ -55,7 +58,7 @@ function buildExportDocument(notes: Array<ExportableNote & { html: string }>): s
           <section class="note-export-title">
             <span class="note-export-icon">${renderExportIcon(note.icon)}</span>
             <div>
-              <h1 class="title-size-${normalizeTitleSize(note.titleSize)}">${escapeHtml(note.title || "未命名")}</h1>
+              <h1 class="title-size-${normalizeTitleSize(note.titleSize)}">${renderExportTitle(note.titleSegments, note.title || "未命名")}</h1>
             </div>
           </section>
 
@@ -185,6 +188,17 @@ function buildExportDocument(notes: Array<ExportableNote & { html: string }>): s
       .note-export-title h1.title-size-h3 {
         font-size: 1.35rem;
       }
+
+      .title-color-default { color: #111827 !important; }
+      .title-color-gray { color: #9b9a97 !important; }
+      .title-color-brown { color: #64473a !important; }
+      .title-color-red { color: #e03e3e !important; }
+      .title-color-orange { color: #d9730d !important; }
+      .title-color-yellow { color: #c99600 !important; }
+      .title-color-green { color: #4d6461 !important; }
+      .title-color-blue { color: #0b6e99 !important; }
+      .title-color-purple { color: #6940a5 !important; }
+      .title-color-pink { color: #ad1a72 !important; }
 
       .note-export-content {
         color: #202123;
@@ -652,6 +666,37 @@ function escapeHtml(value: string): string {
 
 function normalizeTitleSize(value: unknown): NoteTitleSize {
   return value === "h2" || value === "h3" ? value : "h1";
+}
+
+function normalizeTitleColor(value: unknown): NoteTitleColor {
+  return value === "gray" ||
+    value === "brown" ||
+    value === "red" ||
+    value === "orange" ||
+    value === "yellow" ||
+    value === "green" ||
+    value === "blue" ||
+    value === "purple" ||
+    value === "pink"
+    ? value
+    : "default";
+}
+
+function renderExportTitle(value: unknown, title: string): string {
+  if (!Array.isArray(value)) return escapeHtml(title);
+  const segments = value
+    .map((segment) => {
+      if (!segment || typeof segment !== "object") return null;
+      const candidate = segment as Partial<NoteTitleSegment>;
+      return typeof candidate.text === "string" && candidate.text
+        ? { text: candidate.text, color: normalizeTitleColor(candidate.color) }
+        : null;
+    })
+    .filter((segment): segment is NoteTitleSegment => Boolean(segment));
+  if (segments.map((segment) => segment.text).join("") !== title) return escapeHtml(title);
+  return segments
+    .map((segment) => `<span class="title-color-${segment.color}">${escapeHtml(segment.text)}</span>`)
+    .join("");
 }
 
 function formatDateTime(value: string): string {

@@ -1080,7 +1080,9 @@ button:disabled {
 }
 
 .title-input {
+  display: block;
   width: 100%;
+  min-height: 1.05em;
   margin: 18px 0 16px;
   border: 0;
   outline: 0;
@@ -1089,6 +1091,9 @@ button:disabled {
   font-size: 3.8rem;
   font-weight: 800;
   line-height: 1.05;
+  cursor: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .title-input.title-size-h2 {
@@ -1100,9 +1105,22 @@ button:disabled {
   line-height: 1.12;
 }
 
-.title-input::placeholder {
+.title-input:empty::before {
+  content: attr(data-placeholder);
   color: #b7afa1;
+  pointer-events: none;
 }
+
+.title-color-default { color: #171716 !important; }
+.title-color-gray { color: #9b9a97 !important; }
+.title-color-brown { color: #64473a !important; }
+.title-color-red { color: #e03e3e !important; }
+.title-color-orange { color: #d9730d !important; }
+.title-color-yellow { color: #c99600 !important; }
+.title-color-green { color: #4d6461 !important; }
+.title-color-blue { color: #0b6e99 !important; }
+.title-color-purple { color: #6940a5 !important; }
+.title-color-pink { color: #ad1a72 !important; }
 
 .note-editor {
   min-height: 52vh;
@@ -6168,7 +6186,8 @@ button.note-breadcrumb__item:hover {
 }
 
 .page-icon-picker-button,
-.page-title-size-options {
+.page-title-size-options,
+.page-title-color-options {
   border-color: var(--ui-line);
   background: rgba(255, 255, 255, 0.62);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
@@ -8496,5 +8515,161 @@ button.note-breadcrumb__item:hover {
   .revelation-memorization-verse p {
     font-size: 0.95rem;
     line-height: 2.45;
+  }
+}
+
+/* Compact title controls: keep the editing affordances on one visual line. */
+.page-meta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-height: 40px;
+  width: fit-content;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.page-meta-icon-button,
+.page-meta-color-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  color: #53635f;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+  transition:
+    border-color var(--ui-fast) ease,
+    color var(--ui-fast) ease,
+    background-color var(--ui-fast) ease,
+    box-shadow var(--ui-fast) ease,
+    transform var(--ui-fast) var(--ui-ease);
+}
+
+.page-meta-icon-button:hover,
+.page-meta-color-button:not(:disabled):hover {
+  border-color: rgba(47, 111, 115, 0.3);
+  color: var(--ui-accent-strong);
+  background: #ffffff;
+  box-shadow: var(--ui-shadow-sm);
+  transform: translateY(-1px);
+}
+
+.page-meta-icon-button:focus-visible,
+.page-meta-color-button:focus-visible,
+.page-title-size-option:focus-visible,
+.page-title-color-option:focus-visible {
+  outline: 2px solid rgba(47, 111, 115, 0.42);
+  outline-offset: 2px;
+}
+
+.page-meta-divider {
+  flex: 0 0 1px;
+  width: 1px;
+  height: 22px;
+  margin-inline: 1px;
+  background: var(--ui-line);
+}
+
+.page-title-size-options {
+  flex: 0 0 auto;
+  min-height: 38px;
+}
+
+.page-title-size-option {
+  min-width: 38px;
+  padding-inline: 10px;
+}
+
+.page-title-color-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.page-meta-color-button {
+  position: relative;
+  grid-template-columns: 17px 8px;
+  gap: 6px;
+  width: auto;
+  min-width: 58px;
+  padding-inline: 10px;
+}
+
+.page-meta-color-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+  transform: none;
+}
+
+.page-meta-color-indicator {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--title-color-swatch);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.82), 0 0 0 3px rgba(92, 104, 99, 0.18);
+}
+
+.page-title-color-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(5, 28px);
+  gap: 5px;
+  width: max-content;
+  padding: 7px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 14px 28px rgba(29, 42, 38, 0.15);
+}
+
+.page-title-color-option {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+@media (max-width: 760px) {
+  .page-meta {
+    gap: 7px;
+    width: 100%;
+    padding: 0 1px 2px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .page-meta::-webkit-scrollbar {
+    display: none;
+  }
+
+  .page-meta-divider {
+    margin-inline: 0;
+  }
+
+  .page-title-size-options {
+    grid-template-columns: repeat(3, 40px);
+    width: auto;
+  }
+
+  .page-title-size-option {
+    width: 40px;
+    min-width: 40px;
+    padding-inline: 0;
+  }
+
+  .page-title-color-popover {
+    position: fixed;
+    top: auto;
+    right: 12px;
+    bottom: calc(72px + env(safe-area-inset-bottom));
   }
 }

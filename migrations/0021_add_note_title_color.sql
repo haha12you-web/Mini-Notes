@@ -1,0 +1,1 @@
+ALTER TABLE notes ADD COLUMN title_segments TEXT NOT NULL DEFAULT '[]';
