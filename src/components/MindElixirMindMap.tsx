@@ -87,6 +87,23 @@ export function MindElixirMindMap({ block, editor }: { block: any; editor: any }
     // custom block and create another mind-map block at the drop position.
     const containNativeDrag = (event: DragEvent) => event.stopPropagation();
     const containPointerGesture = (event: PointerEvent) => event.stopPropagation();
+    // BlockNote marks the custom block as non-editable so its own editor does
+    // not try to capture the canvas. Mind Elixir normally starts its inline
+    // editor from an internal double-click detector, but that detector can be
+    // swallowed by the surrounding editor in the embedded (non-fullscreen)
+    // view. Re-dispatch the edit explicitly at the canvas boundary so node
+    // text is editable in both embedded and fullscreen modes.
+    const beginEmbeddedNodeEdit = (event: MouseEvent) => {
+      if (!editor.isEditable || event.button !== 0 || !mindRef.current) return;
+      const target = event.target instanceof Element ? event.target.closest<HTMLElement>(".me-tpc") : null;
+      if (!target || target.id === "input-box") return;
+      const node = (target as HTMLElement & { nodeObj?: unknown }).nodeObj;
+      if (!node) return;
+      event.preventDefault();
+      event.stopPropagation();
+      mindRef.current.selectNode(target as any);
+      void mindRef.current.beginEdit(target as any);
+    };
     const startCanvasPan = (event: PointerEvent) => {
       if (event.button !== 0 && event.pointerType !== "touch") return;
       const target = event.target instanceof Element ? event.target : null;
@@ -137,6 +154,7 @@ export function MindElixirMindMap({ block, editor }: { block: any; editor: any }
     host.addEventListener("pointermove", containPointerGesture);
     host.addEventListener("pointerup", containPointerGesture);
     host.addEventListener("pointercancel", containPointerGesture);
+    host.addEventListener("dblclick", beginEmbeddedNodeEdit, true);
     host.addEventListener("pointerdown", startCanvasPan, true);
     host.addEventListener("pointermove", moveCanvasPan, true);
     host.addEventListener("pointerup", endCanvasPan, true);
@@ -181,6 +199,7 @@ export function MindElixirMindMap({ block, editor }: { block: any; editor: any }
       host.removeEventListener("pointermove", containPointerGesture);
       host.removeEventListener("pointerup", containPointerGesture);
       host.removeEventListener("pointercancel", containPointerGesture);
+      host.removeEventListener("dblclick", beginEmbeddedNodeEdit, true);
       host.removeEventListener("pointerdown", startCanvasPan, true);
       host.removeEventListener("pointermove", moveCanvasPan, true);
       host.removeEventListener("pointerup", endCanvasPan, true);
@@ -231,6 +250,11 @@ export function MindElixirMindMap({ block, editor }: { block: any; editor: any }
         <label>模板 <select value={template} onChange={(event) => applyTemplate(event.target.value as typeof template)} disabled={!editor.isEditable}><option value="default">均衡放射</option><option value="project">项目规划</option><option value="study">学习笔记</option></select></label>
       </div>
     </div>
-    <div ref={hostRef} className="mind-elixir-host" />
+    <div
+      ref={hostRef}
+      className="mind-elixir-host"
+      data-editable={editor.isEditable ? "true" : "false"}
+      aria-label="思维导图画布"
+    />
   </section>;
 }
