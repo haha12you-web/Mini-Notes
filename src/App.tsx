@@ -4926,7 +4926,7 @@ function App() {
                         setCategoryActionMenu(null);
                         setCategoryMenuOpen((current) => !current);
                       }}
-                      title="选择所在分类"
+                      title="快速跳转到文件夹"
                       type="button"
                     >
                       <Folder size={16} />
@@ -4938,8 +4938,7 @@ function App() {
                         <button
                           className={clsx("topbar-category-menu__item", !draft.parentId && "active")}
                           onClick={() => {
-                            void movePageToCategory(draft.id, null);
-                            setCategoryMenuOpen(false);
+                            openNotesOverview();
                           }}
                           role="menuitem"
                           type="button"
@@ -4956,8 +4955,7 @@ function App() {
                             key={category.id}
                             style={{ "--category-option-offset": `${depth * 14}px` } as CSSProperties}
                             onClick={() => {
-                              void movePageToCategory(draft.id, category.id);
-                              setCategoryMenuOpen(false);
+                              openNotesOverview(category.id);
                             }}
                             role="menuitem"
                             type="button"
