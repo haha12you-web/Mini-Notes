@@ -75,6 +75,7 @@ import {
   updateNote
 } from "./api";
 import { collectNoteComments } from "./comments";
+import { lastLocalDraftId, readLocalDraft, removeLocalDraft, retryableSaveStatus, sameEditableNote, writeLocalDraft } from "./localDrafts";
 import { NoteIcon } from "./components/NoteIcon";
 import { isImageIcon, type EmojiItem } from "./emojiPacks";
 import { openExportWindow } from "./exportWindow";
@@ -315,6 +316,13 @@ function App() {
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [appError, setAppError] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
+  const [conflictRemote, setConflictRemote] = useState<Note | null>(null);
+  const [retryAttempt, setRetryAttempt] = useState(0);
+  const [retryAllowed, setRetryAllowed] = useState(false);
+  const [localDraftSaved, setLocalDraftSaved] = useState(false);
+  const [failedNoteId, setFailedNoteId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [sharePending, setSharePending] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
@@ -357,6 +365,13 @@ function App() {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingCategoryTitle, setEditingCategoryTitle] = useState("");
   const revisionRef = useRef(0);
+  const sessionUserRef = useRef<AuthUser | null>(null);
+  const hasUsersRef = useRef(false);
+  const acknowledgedNotesRef = useRef(new Map<string, Note>());
+  const latestSaveRevisionRef = useRef(new Map<string, number>());
+  const saveBlockedRef = useRef(false);
+  const retryCountRef = useRef(0);
+  const persistedDraftsRef = useRef(new Map<string, { revision: number; base: string; token: string }>());
   const authSessionEpochRef = useRef(0);
   const navigationIntentRef = useRef(0);
   const loadNoteRequestRef = useRef(0);
@@ -508,6 +523,13 @@ function App() {
     navigationIntentRef.current += 1;
     loadNoteRequestRef.current += 1;
     setSessionUser(null);
+    sessionUserRef.current = null;
+    hasUsersRef.current = nextHasUsers;
+    acknowledgedNotesRef.current.clear();
+    persistedDraftsRef.current.clear();
+    setConflictRemote(null);
+    saveBlockedRef.current = false;
+    setRetryAllowed(false);
     setHasUsers(nextHasUsers);
     setAuthMode("login");
     setAuthPassword("");
@@ -549,6 +571,8 @@ function App() {
       const requestId = loadNoteRequestRef.current + 1;
       loadNoteRequestRef.current = requestId;
       setIsLoadingNote(true);
+      setFailedNoteId(null);
+      setLocalDraftSaved(false);
       setAppError(null);
       setShareOpen(false);
       setShareCopied(false);
@@ -556,13 +580,38 @@ function App() {
         try {
         const note = normalizeNote(await getNote(id));
         if (loadNoteRequestRef.current === requestId) {
+          acknowledgedNotesRef.current.set(id, note);
+          let recovered: Note | null = null;
+          let conflict = false;
+          try {
+            const userId = sessionUserRef.current?.id;
+            const local = userId ? readLocalDraft(userId, id) : null;
+            if (local && !sameEditableNote(local.note, note)) {
+              conflict = local.note.updatedAt !== note.updatedAt;
+              recovered = { ...note, ...clonePageSnapshot(local.note), updatedAt: local.note.updatedAt };
+              setAppError(conflict
+                ? "已找回本地草稿，但云端版本也有变化。请核对后选择保留哪个版本。"
+                : "已恢复上次未保存的本地草稿，正在重新保存。");
+            } else if (local && userId) {
+              removeLocalDraft(userId, id, local.token);
+            }
+          } catch {
+            setDraftStorageError("无法读取本地草稿，请检查浏览器存储权限。");
+          }
+          const nextDraft = recovered ?? note;
+          setLocalDraftSaved(Boolean(recovered));
+          revisionRef.current += 1;
+          saveBlockedRef.current = conflict;
+          setConflictRemote(conflict ? note : null);
+          retryCountRef.current = 0;
+          setRetryAllowed(false);
           selectedIdRef.current = id;
           setSelectedId(id);
-          draftRef.current = note;
-          lastPageSnapshotRef.current = clonePageSnapshot(note);
-          setDraft(note);
-          setDirty(false);
-          setSaveStatus("idle");
+          draftRef.current = nextDraft;
+          lastPageSnapshotRef.current = clonePageSnapshot(nextDraft);
+          setDraft(nextDraft);
+          setDirty(Boolean(recovered));
+          setSaveStatus(recovered ? (conflict ? "error" : "saving") : "idle");
           resetPageHistory(note.id);
         }
         } catch (error) {
@@ -571,12 +620,14 @@ function App() {
         }
 
         if (error instanceof ApiError && error.status === 401) {
-          handleLoggedOut(hasUsers);
+          handleLoggedOut(hasUsersRef.current);
           setAppError("登录状态已失效，请重新登录。");
         } else if (error instanceof ApiError) {
           setAppError(error.message);
+          setFailedNoteId(id);
         } else {
           setAppError("页面加载失败。");
+          setFailedNoteId(id);
         }
       } finally {
         if (loadNoteRequestRef.current === requestId) {
@@ -584,17 +635,20 @@ function App() {
         }
       }
     },
-    [handleLoggedOut, hasUsers, resetPageHistory]
+    [handleLoggedOut, resetPageHistory]
   );
 
   const bootstrap = useCallback(async () => {
     setIsBooting(true);
+    setBootstrapError(null);
     setAppError(null);
 
     try {
       const status = await getStatus();
       setHasUsers(status.hasUsers);
       setSessionUser(status.user);
+      hasUsersRef.current = status.hasUsers;
+      sessionUserRef.current = status.user;
 
       if (!status.authenticated) {
         setAuthMode("login");
@@ -607,10 +661,13 @@ function App() {
 
       const nextNotes = (await listNotes()).map(normalizeNoteSummary);
       setNotes(nextNotes);
+      let recoveryId: string | null = null;
+      try { recoveryId = status.user ? lastLocalDraftId(status.user.id) : null; } catch { /* storage warning is shown when editing */ }
+      const preferredId = recoveryId ?? selectedIdRef.current;
       const nextSelected =
-        selectedIdRef.current &&
-        nextNotes.some((note) => note.id === selectedIdRef.current && note.kind === "page")
-          ? selectedIdRef.current
+        preferredId &&
+        nextNotes.some((note) => note.id === preferredId && note.kind === "page")
+          ? preferredId
           : getFirstPageId(nextNotes);
 
       if (nextSelected) {
@@ -628,24 +685,16 @@ function App() {
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
-        handleLoggedOut(hasUsers);
+        handleLoggedOut(hasUsersRef.current);
       } else if (error instanceof ApiError) {
-        setAppError(error.message);
-        // Never leave the user in an empty workspace when the API is
-        // unreachable. Keep the authentication screen visible so the next
-        // action is obvious and the error can be retried after connectivity
-        // returns.
-        setAuthMode("login");
-        setIsLocked(true);
+        setBootstrapError(error.message);
       } else {
-        setAppError("工作区初始化失败。");
-        setAuthMode("login");
-        setIsLocked(true);
+        setBootstrapError("工作区初始化失败。");
       }
     } finally {
       setIsBooting(false);
     }
-  }, [handleLoggedOut, hasUsers, loadNote, resetPageHistory]);
+  }, [handleLoggedOut, loadNote, resetPageHistory]);
 
   useEffect(() => {
     if (isPublicView) {
@@ -1132,6 +1181,33 @@ function App() {
     return new URL(`/share/${folderShareTarget.shareToken}`, window.location.origin).toString();
   }, [folderShareTarget?.shareToken]);
 
+  const persistDraft = useCallback((snapshot: Note, revision: number, base?: string): string | null => {
+    const userId = sessionUserRef.current?.id;
+    if (!userId) return null;
+    const updatedAt = base ?? (saveBlockedRef.current ? snapshot.updatedAt : acknowledgedNotesRef.current.get(snapshot.id)?.updatedAt ?? snapshot.updatedAt);
+    const key = `${userId}:${snapshot.id}`;
+    const previous = persistedDraftsRef.current.get(key);
+    if (previous?.revision === revision && previous.base === updatedAt) return previous.token;
+    try {
+      const token = writeLocalDraft(userId, { ...snapshot, updatedAt });
+      persistedDraftsRef.current.set(key, { revision, base: updatedAt, token });
+      setDraftStorageError(null);
+      setLocalDraftSaved(true);
+      return token;
+    } catch {
+      setDraftStorageError("本地草稿备份失败（可能存储已满或权限受限）。请勿关闭页面，保存成功后再离开。");
+      setLocalDraftSaved(false);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!dirty || !draft || isLocked || isPublicView) return;
+    const revision = revisionRef.current;
+    const timer = window.setTimeout(() => persistDraft(draft, revision), 150);
+    return () => window.clearTimeout(timer);
+  }, [dirty, draft, isLocked, isPublicView, persistDraft]);
+
   const saveDraft = useCallback(
     (snapshot: Note, revision: number): Promise<boolean> => {
       const sessionEpoch = authSessionEpochRef.current;
@@ -1140,30 +1216,45 @@ function App() {
       if (existingSave) {
         return existingSave;
       }
+      if (saveBlockedRef.current) return Promise.resolve(false);
+      latestSaveRevisionRef.current.set(`${sessionEpoch}:${snapshot.id}`, revision);
 
       const queuedSnapshot: Note = {
         ...snapshot,
         content: cloneNoteBlocks(snapshot.content)
       };
       const executeSave = async (): Promise<boolean> => {
-        if (authSessionEpochRef.current !== sessionEpoch) {
+        if (authSessionEpochRef.current !== sessionEpoch || saveBlockedRef.current ||
+            latestSaveRevisionRef.current.get(`${sessionEpoch}:${snapshot.id}`) !== revision) {
           return false;
         }
+        const userId = sessionUserRef.current?.id;
+        const localToken = selectedIdRef.current === queuedSnapshot.id && revisionRef.current !== revision
+          ? null : persistDraft(queuedSnapshot, revision);
 
         try {
           setSaveStatus("saving");
+          const acknowledged = acknowledgedNotesRef.current.get(queuedSnapshot.id);
           const saved = normalizeNote(
             await updateNote(queuedSnapshot.id, {
               title: queuedSnapshot.title,
               icon: queuedSnapshot.icon,
               titleSize: queuedSnapshot.titleSize,
               titleSegments: queuedSnapshot.titleSegments,
-              content: queuedSnapshot.content
+              ...(acknowledged && JSON.stringify(acknowledged.content) === JSON.stringify(queuedSnapshot.content)
+                ? {} : { content: queuedSnapshot.content }),
+              expectedUpdatedAt: acknowledged?.updatedAt ?? queuedSnapshot.updatedAt
             })
           );
 
           if (authSessionEpochRef.current !== sessionEpoch) {
             return false;
+          }
+          acknowledgedNotesRef.current.set(saved.id, saved);
+          retryCountRef.current = 0;
+          setRetryAllowed(false);
+          if (userId && localToken) {
+            try { removeLocalDraft(userId, saved.id, localToken); } catch { /* retain the draft on storage errors */ }
           }
 
           const currentSummary = notesRef.current.find((note) => note.id === saved.id);
@@ -1191,16 +1282,25 @@ function App() {
             setDraft(nextDraft);
             setDirty(false);
             setSaveStatus("saved");
+            setLocalDraftSaved(false);
             setAppError(null);
+          } else if (selectedIdRef.current === queuedSnapshot.id && draftRef.current) {
+            // The server acknowledged an earlier edit. Rebase the newer local
+            // draft so recovery does not mistake our own save for a conflict.
+            persistDraft(draftRef.current, revisionRef.current, saved.updatedAt);
           }
           return isCurrentRevision;
         } catch (error) {
+          if (authSessionEpochRef.current !== sessionEpoch) return false;
           if (error instanceof ApiError && error.status === 401) {
-            handleLoggedOut(hasUsers);
+            handleLoggedOut(hasUsersRef.current);
             setAppError("登录状态已失效，请重新登录。");
           } else {
             setSaveStatus("error");
             setAppError(error instanceof ApiError ? error.message : "自动保存失败。");
+            const status = error instanceof ApiError ? error.status : 0;
+            setRetryAllowed(retryableSaveStatus(status));
+            if (status === 409) saveBlockedRef.current = true;
           }
           return false;
         }
@@ -1218,7 +1318,7 @@ function App() {
       noteSaveQueueRef.current = trackedSave;
       return trackedSave;
     },
-    [handleLoggedOut, hasUsers]
+    [handleLoggedOut, persistDraft]
   );
 
   useEffect(() => {
@@ -1233,6 +1333,7 @@ function App() {
 
       const currentDraft = draftRef.current;
       if (currentDraft) {
+        persistDraft(currentDraft, revisionRef.current);
         void saveDraft(currentDraft, revisionRef.current);
       }
     };
@@ -1262,10 +1363,34 @@ function App() {
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [dirty, isLocked, isPublicView, saveDraft]);
+  }, [dirty, isLocked, isPublicView, persistDraft, saveDraft]);
 
   useEffect(() => {
-    if (!draft || !dirty || isLocked) {
+    if (!dirty || !retryAllowed || saveStatus !== "error" || isLocked || saveBlockedRef.current) return;
+    const delays = [1500, 4000, 10000];
+    const delay = delays[retryCountRef.current];
+    if (delay === undefined) return;
+    const timer = window.setTimeout(() => {
+      retryCountRef.current += 1;
+      const current = draftRef.current;
+      if (current) void saveDraft(current, revisionRef.current).then(() => setRetryAttempt((value) => value + 1));
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [dirty, isLocked, retryAllowed, saveStatus, saveDraft, retryAttempt]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      if (!dirty || isLocked || saveBlockedRef.current) return;
+      retryCountRef.current = 0;
+      const current = draftRef.current;
+      if (current) void saveDraft(current, revisionRef.current);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [dirty, isLocked, saveDraft]);
+
+  useEffect(() => {
+    if (!draft || !dirty || isLocked || saveBlockedRef.current) {
       return;
     }
 
@@ -1317,6 +1442,7 @@ function App() {
       pushPageHistorySnapshot(currentDraft.id, previousSnapshot);
       const nextDraft = applyPageSnapshotToNote(currentDraft, nextSnapshot);
       revisionRef.current += 1;
+      retryCountRef.current = 0;
       draftRef.current = nextDraft;
       lastPageSnapshotRef.current = nextSnapshot;
       setDirty(true);
@@ -1348,6 +1474,15 @@ function App() {
     },
     [pushPageHistorySnapshot]
   );
+
+  const attachTitleInput = useCallback((editor: HTMLDivElement | null) => {
+    titleInputRef.current = editor;
+    const current = draftRef.current;
+    if (!editor || !current) return;
+    const segments = normalizeTitleSegments(current.titleSegments, current.title);
+    writeTitleSegments(editor, segments);
+    titleDomSignatureRef.current = JSON.stringify(segments);
+  }, []);
 
   useEffect(() => {
     const editor = titleInputRef.current;
@@ -1453,6 +1588,7 @@ function App() {
       }
 
       const savedParent = normalizeNote(await updateNote(parentId, { content: result.blocks }));
+      acknowledgedNotesRef.current.set(savedParent.id, savedParent);
       setNotes((current) => updateSummary(current, savedParent));
     },
     [editDraft, notes]
@@ -2009,6 +2145,8 @@ function App() {
           });
           const { previousParentId, ...summaryValue } = result;
           const savedSummary = normalizeNoteSummary(summaryValue);
+          const acknowledged = acknowledgedNotesRef.current.get(noteId);
+          if (acknowledged) acknowledgedNotesRef.current.set(noteId, { ...acknowledged, ...savedSummary });
 
           if (noteMoveVersionsRef.current.get(noteId) === version) {
             applyNotePositionLocally(
@@ -2816,6 +2954,8 @@ function App() {
           : await login(payload);
 
       setSessionUser(status.user);
+      sessionUserRef.current = status.user;
+      hasUsersRef.current = true;
       setHasUsers(true);
       setAuthPassword("");
       setAuthInviteCode("");
@@ -2983,6 +3123,8 @@ function App() {
       if (authSessionEpochRef.current !== sessionEpoch) {
         return;
       }
+      const acknowledged = acknowledgedNotesRef.current.get(targetId);
+      if (acknowledged && sameEditableNote(acknowledged, shared)) acknowledgedNotesRef.current.set(targetId, shared);
 
       const nextNotes = notesRef.current.map((note) =>
         note.id === targetId
@@ -3042,6 +3184,8 @@ function App() {
       if (authSessionEpochRef.current !== sessionEpoch) {
         return;
       }
+      const acknowledged = acknowledgedNotesRef.current.get(targetId);
+      if (acknowledged && sameEditableNote(acknowledged, unshared)) acknowledgedNotesRef.current.set(targetId, unshared);
 
       const nextNotes = notesRef.current.map((note) =>
         note.id === targetId
@@ -3184,6 +3328,7 @@ function App() {
 
     try {
       const saved = normalizeNote(await updateNote(noteId, { icon }));
+      acknowledgedNotesRef.current.set(saved.id, saved);
       setNotes((current) => updateSummary(current, saved));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -3232,6 +3377,8 @@ function App() {
       if (authSessionEpochRef.current !== sessionEpoch) {
         return;
       }
+      const acknowledged = acknowledgedNotesRef.current.get(saved.id);
+      if (acknowledged && sameEditableNote(acknowledged, saved)) acknowledgedNotesRef.current.set(saved.id, saved);
 
       const nextNotes = notesRef.current.map((item) =>
         item.id === saved.id
@@ -4199,6 +4346,18 @@ function App() {
     );
   }
 
+  if (bootstrapError) {
+    return (
+      <main className="center-screen">
+        <section className="recovery-state" role="alert">
+          <WifiOff size={28} />
+          <p>{bootstrapError}</p>
+          <button className="primary-button" type="button" onClick={() => void bootstrap()}>重新连接工作区</button>
+        </section>
+      </main>
+    );
+  }
+
   if (isLocked) {
     return (
       <main className="lock-screen">
@@ -4990,9 +5149,9 @@ function App() {
                       </span>
                     ) : null}
 
-                    <span className={clsx("save-state", saveStatus)}>
-                      {saveStatus === "saving" ? <Clock3 size={15} /> : <Check size={15} />}
-                      {saveLabel(saveStatus)}
+                    <span className={clsx("save-state", saveStatus)} role="status" aria-live="polite">
+                      {saveStatus === "error" ? <WifiOff size={15} /> : saveStatus === "saving" ? <Clock3 size={15} /> : <Check size={15} />}
+                      {saveStatus === "error" && localDraftSaved ? "本地已备份，待同步" : saveLabel(saveStatus)}
                     </span>
 
                     <div className="topbar-stack">
@@ -5036,12 +5195,66 @@ function App() {
           </div>
         </header>
 
-        {appError && !isAdminView ? (
-          <div className="error-strip">
+        {(appError || conflictRemote) && !isAdminView ? (
+          <div className="error-strip" role="alert">
             <WifiOff size={16} />
-            <span>{appError}</span>
+            <span>{appError ?? "本地草稿与云端版本有冲突，请核对后选择保留哪个版本。"}</span>
+            {dirty && !conflictRemote ? (
+              <button className="toolbar-button" type="button" onClick={() => {
+                retryCountRef.current = 0;
+                if (saveBlockedRef.current && selectedIdRef.current) {
+                  if (draftRef.current && !persistDraft(draftRef.current, revisionRef.current)) return;
+                  void loadNote(selectedIdRef.current);
+                }
+                else if (draftRef.current) void saveDraft(draftRef.current, revisionRef.current);
+              }}>{saveBlockedRef.current ? "重新加载并核对" : "立即重试"}</button>
+            ) : failedNoteId ? (
+              <button className="toolbar-button" type="button" onClick={() => void loadNote(failedNoteId)}>重新加载页面</button>
+            ) : null}
+            {conflictRemote ? (
+              <>
+                <button className="toolbar-button" type="button" onClick={() => {
+                  if (!window.confirm("确认用当前本地草稿更新云端版本？请先核对正文。")) return;
+                  const current = draftRef.current;
+                  if (!current) return;
+                  saveBlockedRef.current = false;
+                  const next = { ...current, updatedAt: conflictRemote.updatedAt };
+                  revisionRef.current += 1;
+                  draftRef.current = next;
+                  setDraft(next);
+                  setConflictRemote(null);
+                  setDirty(true);
+                  setSaveStatus("saving");
+                  void saveDraft(next, revisionRef.current);
+                }}>保留本地版本</button>
+                <button className="toolbar-button" type="button" onClick={() => {
+                  if (!window.confirm("确认放弃这份本地草稿，使用已加载的云端版本？")) return;
+                  const userId = sessionUserRef.current?.id;
+                  try {
+                    const local = userId ? readLocalDraft(userId, conflictRemote.id) : null;
+                    if (userId && local) removeLocalDraft(userId, conflictRemote.id, local.token);
+                  } catch {
+                    setDraftStorageError("本地草稿未能清除，请检查浏览器存储权限。");
+                    return;
+                  }
+                  revisionRef.current += 1;
+                  saveBlockedRef.current = false;
+                  draftRef.current = conflictRemote;
+                  lastPageSnapshotRef.current = clonePageSnapshot(conflictRemote);
+                  setDraft(conflictRemote);
+                  setDirty(false);
+                  setConflictRemote(null);
+                  setAppError(null);
+                  setSaveStatus("idle");
+                  resetPageHistory(conflictRemote.id);
+                  setEditorDocumentVersion((value) => value + 1);
+                }}>使用云端版本</button>
+              </>
+            ) : null}
           </div>
         ) : null}
+
+        {draftStorageError ? <div className="error-strip" role="alert"><WifiOff size={16} /><span>{draftStorageError}</span></div> : null}
 
         <Suspense fallback={<LazyViewFallback label="正在加载页面" />}>
           {isAdminView && sessionUser ? (
@@ -5274,7 +5487,7 @@ function App() {
                     event.preventDefault();
                     setEditorFocusRequest((current) => current + 1);
                   }}
-                  ref={titleInputRef}
+                  ref={attachTitleInput}
                   role="textbox"
                   spellCheck
                   suppressContentEditableWarning

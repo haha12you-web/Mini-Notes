@@ -1,0 +1,100 @@
+{
+  "runtime": "v24.19.0",
+  "note": "Synthetic Chinese paragraphs; actual source functions; local elapsed ms, not production Worker CPU. No database, R2, network, auth or full request costs included. Seven samples, median, after a warm-up.",
+  "rows": [
+    {
+      "blocks": 20,
+      "jsonKiB": 12.8,
+      "parseStoredBlocksMs": 0.049,
+      "summaryMs": 0.038,
+      "searchIndexMs": 0.262,
+      "uploadScanMs": 0.024,
+      "pageLinkScanMs": 0.016,
+      "embeddedRewriteMs": 0.046,
+      "stringifyMs": 0.025
+    },
+    {
+      "blocks": 100,
+      "jsonKiB": 64.2,
+      "parseStoredBlocksMs": 0.209,
+      "summaryMs": 0.017,
+      "searchIndexMs": 0.51,
+      "uploadScanMs": 0.129,
+      "pageLinkScanMs": 0.089,
+      "embeddedRewriteMs": 0.144,
+      "stringifyMs": 0.152
+    },
+    {
+      "blocks": 300,
+      "jsonKiB": 193,
+      "parseStoredBlocksMs": 0.695,
+      "summaryMs": 0.018,
+      "searchIndexMs": 0.439,
+      "uploadScanMs": 0.155,
+      "pageLinkScanMs": 0.118,
+      "embeddedRewriteMs": 0.171,
+      "stringifyMs": 0.494
+    },
+    {
+      "blocks": 1000,
+      "jsonKiB": 643.4,
+      "parseStoredBlocksMs": 2.224,
+      "summaryMs": 0.016,
+      "searchIndexMs": 0.409,
+      "uploadScanMs": 0.529,
+      "pageLinkScanMs": 0.373,
+      "embeddedRewriteMs": 0.569,
+      "stringifyMs": 1.779
+    }
+  ],
+  "encodingWork": [
+    {
+      "blocks": 20,
+      "operation": "extractNoteSummary",
+      "encodingCalls": 12,
+      "encodedMiB": 0
+    },
+    {
+      "blocks": 20,
+      "operation": "extractSearchTextFromBlocks",
+      "encodingCalls": 140,
+      "encodedMiB": 0.01
+    },
+    {
+      "blocks": 100,
+      "operation": "extractNoteSummary",
+      "encodingCalls": 12,
+      "encodedMiB": 0
+    },
+    {
+      "blocks": 100,
+      "operation": "extractSearchTextFromBlocks",
+      "encodingCalls": 300,
+      "encodedMiB": 0.02
+    },
+    {
+      "blocks": 300,
+      "operation": "extractNoteSummary",
+      "encodingCalls": 12,
+      "encodedMiB": 0
+    },
+    {
+      "blocks": 300,
+      "operation": "extractSearchTextFromBlocks",
+      "encodingCalls": 300,
+      "encodedMiB": 0.02
+    },
+    {
+      "blocks": 1000,
+      "operation": "extractNoteSummary",
+      "encodingCalls": 12,
+      "encodedMiB": 0
+    },
+    {
+      "blocks": 1000,
+      "operation": "extractSearchTextFromBlocks",
+      "encodingCalls": 300,
+      "encodedMiB": 0.02
+    }
+  ]
+}

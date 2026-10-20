@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "check": "pnpm build",
+    "test": "node --test tests/reliability.test.mjs",
+    "check": "pnpm test && pnpm build",
     "android:sync": "pnpm build && cap sync android",
     "android:open": "cap open android",
     "android:build": "pnpm android:sync && cap build android",

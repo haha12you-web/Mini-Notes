@@ -26,6 +26,7 @@
     "src/emojiPacks.ts",
     "src/editorSchema.tsx",
     "src/imageClipboard.ts",
+    "src/localDrafts.ts",
     "src/main.tsx",
     "src/export.ts",
     "src/exportWindow.ts",

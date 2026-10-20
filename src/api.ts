@@ -42,7 +42,8 @@ import { apiUrl } from "./apiBase";
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number
+    public readonly status: number,
+    public readonly requestId?: string
   ) {
     super(message);
   }
@@ -461,7 +462,11 @@ async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
 
     if (!response.ok) {
       const message = summarizeApiError(data, text, contentType, response.statusText);
-      throw new ApiError(message || "请求失败。", response.status);
+      const requestId = response.headers.get("X-Request-ID") ?? response.headers.get("cf-ray") ?? undefined;
+      const publicRouteSegments = new Set(["api", "notes", "status", "auth", "login", "logout", "register", "public", "share", "files", "search", "move"]);
+      const route = path.split("?")[0].split("/").map((segment) => !segment || publicRouteSegments.has(segment) ? segment : ":id").join("/");
+      console.warn("API request failed", { method: init.method ?? "GET", path: route, status: response.status, requestId });
+      throw new ApiError(message || "请求失败。", response.status, requestId);
     }
 
     return (data ?? null) as T;

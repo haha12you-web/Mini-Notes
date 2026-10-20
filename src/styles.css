@@ -536,6 +536,7 @@ button:disabled {
 
 .error-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 14px auto 0;
@@ -3768,6 +3769,15 @@ button:disabled {
   display: grid;
   place-items: center;
   gap: 10px;
+}
+
+.recovery-state {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  max-width: 36rem;
+  padding: 24px;
+  text-align: center;
 }
 
 .lock-screen {

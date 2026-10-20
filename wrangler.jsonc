@@ -3,6 +3,10 @@
   "name": "mini-notes",
   "main": "src/worker.ts",
   "compatibility_date": "2026-07-01",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "assets": {
     "binding": "ASSETS",
     "directory": "./dist",

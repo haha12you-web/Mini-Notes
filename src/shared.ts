@@ -83,6 +83,7 @@ export type NoteCreateInput = {
 };
 
 export type NoteUpdateInput = {
+  expectedUpdatedAt?: string;
   title?: string;
   icon?: string;
   titleSize?: NoteTitleSize;

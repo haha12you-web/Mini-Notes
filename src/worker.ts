@@ -214,7 +214,6 @@ const TEN_MINUTE_CONTENT_OBJECT_KEY = "ten-minute/content.json";
 const NOTE_SEARCH_TEXT_MAX_BYTES = 16 * 1024;
 const NOTE_SUMMARY_MAX_BYTES = 512;
 const NOTE_SEARCH_PATTERN_MAX_BYTES = 50;
-const LEGACY_NOTE_CONTENT_MIGRATION_BATCH_SIZE = 8;
 const DEFAULT_FILE_NAME = "未命名文件";
 const DEFAULT_FILE_MIME_TYPE = "application/octet-stream";
 const EMBEDDED_UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
@@ -266,16 +265,25 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/")) {
+      const requestId = crypto.randomUUID();
+      const started = Date.now();
+      const route = url.pathname.split("/").map((part) => /^(api|notes|status|auth|login|logout|register|public|share|files|search|move)$/.test(part) ? part : part ? ":id" : "").join("/");
+      const context = { requestId, ray: request.headers.get("cf-ray"), method: request.method, route };
+      console.log({ event: "api.begin", ...context });
+      let response: Response;
       try {
-        return withCors(await handleApi(request, env, url), request);
+        response = await handleApi(request, env, url);
       } catch (cause) {
         if (cause instanceof HttpError) {
-          return withCors(error(cause.message, cause.status), request);
+          response = error(cause.message, cause.status);
+        } else {
+          console.error({ event: "api.error", ...context, message: cause instanceof Error ? cause.message : "Unknown error" });
+          response = error("请求失败。", 500);
         }
-
-        console.error(cause);
-        return withCors(error("请求失败。", 500), request);
       }
+      console.log({ event: "api.end", ...context, status: response.status, elapsedMs: Date.now() - started });
+      response.headers.set("X-Request-ID", requestId);
+      return withCors(response, request);
     }
 
     return env.ASSETS.fetch(request);
@@ -2677,8 +2685,6 @@ async function logoutUser(request: Request, env: Env): Promise<Response> {
 }
 
 async function listNotes(env: Env, userId: string): Promise<Response> {
-  await migrateLegacyNoteContentsForUser(env, userId, LEGACY_NOTE_CONTENT_MIGRATION_BATCH_SIZE);
-
   const { results } = await env.DB.prepare(
     `SELECT ${NOTE_COLUMNS}
      FROM notes
@@ -2863,6 +2869,9 @@ async function updateNote(
   }
 
   const body = await readJson<NoteUpdateInput>(request);
+  if (body.expectedUpdatedAt !== undefined && body.expectedUpdatedAt !== current.updatedAt) {
+    throw new HttpError("页面版本已变化，本地草稿已保留，请重新加载后核对。", 409);
+  }
   const currentKind = cleanNoteKind(current.kind);
   const hasContentUpdate = currentKind === "page" && body.content !== undefined;
   const currentContent =
@@ -2908,7 +2917,7 @@ async function updateNote(
     isArchived:
       body.isArchived === undefined ? Boolean(current.isArchived) : body.isArchived,
     content: nextContent,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString()
   };
 
   if (hasContentUpdate) {
@@ -2931,7 +2940,8 @@ async function updateNote(
        WHERE id = ?
          AND user_id = ?
          AND is_archived = 0
-         AND ((content_key = ?) OR (content_key IS NULL AND ? IS NULL))`
+         AND ((content_key = ?) OR (content_key IS NULL AND ? IS NULL))
+         AND updated_at = ?`
     )
       .bind(
         next.title,
@@ -2951,7 +2961,8 @@ async function updateNote(
         id,
         userId,
         current.contentKey ?? null,
-        current.contentKey ?? null
+        current.contentKey ?? null,
+        current.updatedAt
       )
       .run()
       .catch(async (cause) => {
@@ -2996,7 +3007,8 @@ async function updateNote(
            updated_at = ?
        WHERE id = ?
          AND user_id = ?
-         AND is_archived = 0`
+         AND is_archived = 0
+         AND updated_at = ?`
     )
       .bind(
         next.title,
@@ -3010,7 +3022,8 @@ async function updateNote(
         next.sortOrder,
         next.updatedAt,
         id,
-        userId
+        userId,
+        current.updatedAt
       )
       .run();
 
@@ -4039,25 +4052,13 @@ function parseStoredBlocks(value: unknown): NoteBlock[] | null {
   }
 }
 
-async function readNoteContent(env: Env, row: DbNoteRow, userId?: string): Promise<NoteBlock[]> {
+async function readNoteContent(env: Env, row: DbNoteRow, _userId?: string): Promise<NoteBlock[]> {
   const legacyBlocks = parseStoredBlocks(row.content);
   const hasLegacyContent = Boolean(legacyBlocks && legacyBlocks.length > 0);
 
   if (!row.contentKey) {
-    const blocks = legacyBlocks ?? [];
-    if (userId && cleanNoteKind(row.kind) === "page") {
-      try {
-        await migrateLegacyNoteContentToR2(env, userId, row, blocks);
-      } catch (cause) {
-        console.error("Failed to migrate legacy note content", {
-          noteId: row.id,
-          userId,
-          cause
-        });
-      }
-    }
-
-    return blocks;
+    // Legacy content migrates on the next explicit save. Reads must stay read-only.
+    return legacyBlocks ?? [];
   }
 
   try {
@@ -4212,87 +4213,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function migrateLegacyNoteContentsForUser(
-  env: Env,
-  userId: string,
-  limit: number
-): Promise<void> {
-  const { results } = await env.DB.prepare(
-    `SELECT ${NOTE_COLUMNS}, user_id AS userId, content
-     FROM notes
-     WHERE user_id = ?
-       AND kind = 'page'
-       AND is_archived = 0
-       AND content_key IS NULL
-     ORDER BY updated_at DESC
-     LIMIT ?`
-  )
-    .bind(userId, limit)
-    .all<DbNoteRow>();
-
-  await Promise.all(
-    results.map(async (note) => {
-      try {
-        await readNoteContent(env, note, userId);
-      } catch (cause) {
-        console.error("Failed to migrate legacy note content", {
-          noteId: note.id,
-          userId,
-          cause
-        });
-      }
-    })
-  );
-}
-
-async function migrateLegacyNoteContentToR2(
-  env: Env,
-  userId: string,
-  row: DbNoteRow,
-  blocks: NoteBlock[]
-): Promise<void> {
-  if (row.contentKey) {
-    return;
-  }
-
-  const storedContent = await persistNoteContent(env, userId, row.id, blocks, true);
-  const summary = extractNoteSummary(blocks);
-  const updateResult = await env.DB.prepare(
-    `UPDATE notes
-     SET content = ?,
-         content_key = ?,
-         content_size = ?,
-         summary = ?
-     WHERE id = ?
-       AND user_id = ?
-       AND content_key IS NULL`
-  )
-    .bind(
-      storedContent.dbContent,
-      storedContent.contentKey,
-      storedContent.contentSize,
-      summary,
-      row.id,
-      userId
-    )
-    .run()
-    .catch(async (cause) => {
-      await deleteStaleNoteContent(env, storedContent.contentKey, null);
-      throw cause;
-    });
-
-  if (updateResult.meta.changes !== 1) {
-    await deleteStaleNoteContent(env, storedContent.contentKey, null);
-    return;
-  }
-
-  row.content = storedContent.dbContent;
-  row.contentKey = storedContent.contentKey;
-  row.contentSize = storedContent.contentSize;
-  row.summary = summary;
-  await syncNoteIndexes(env, userId, row.id, cleanNoteKind(row.kind), row.title, blocks, row.updatedAt);
-}
-
 async function persistNoteContent(
   env: Env,
   userId: string,
@@ -4408,7 +4328,19 @@ async function materializeEmbeddedUploads(
   userId: string,
   blocks: NoteBlock[]
 ): Promise<NoteBlock[]> {
+  if (!hasEmbeddedUpload(blocks)) return blocks;
   return rewriteEmbeddedUploads(env, userId, blocks) as Promise<NoteBlock[]>;
+}
+
+function hasEmbeddedUpload(value: unknown, key = ""): boolean {
+  if (typeof value === "string") return isEmbeddableUrlKey(key) && value.startsWith("data:");
+  if (Array.isArray(value)) return value.some((item) => hasEmbeddedUpload(item, key));
+  if (value && typeof value === "object") {
+    for (const nestedKey in value) {
+      if (Object.hasOwn(value, nestedKey) && hasEmbeddedUpload((value as Record<string, unknown>)[nestedKey], nestedKey)) return true;
+    }
+  }
+  return false;
 }
 
 async function rewriteEmbeddedUploads(
@@ -4540,29 +4472,40 @@ function extractSearchTextFromBlocks(blocks: NoteBlock[]): string {
   return truncateUtf8(normalizeSearchText(parts.join(" ")), NOTE_SEARCH_TEXT_MAX_BYTES);
 }
 
-function collectSearchText(value: unknown, parts: string[], key = ""): void {
-  if (byteLength(parts.join(" ")) >= NOTE_SEARCH_TEXT_MAX_BYTES) {
-    return;
-  }
+function collectSearchText(
+  value: unknown,
+  parts: string[],
+  key = "",
+  budget = { remaining: NOTE_SEARCH_TEXT_MAX_BYTES }
+): void {
+  if (budget.remaining <= 0) return;
 
   if (typeof value === "string") {
     const cleaned = cleanSearchTextValue(value, key);
     if (cleaned) {
-      parts.push(cleaned);
+      const separatorBytes = parts.length ? 1 : 0;
+      const text = truncateUtf8(cleaned, budget.remaining - separatorBytes);
+      if (text) parts.push(text);
+      budget.remaining -= separatorBytes + byteLength(text);
+      // Stop even if the remaining budget cannot fit the next code point.
+      if (text.length < cleaned.length) budget.remaining = 0;
     }
     return;
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      collectSearchText(item, parts, key);
+      collectSearchText(item, parts, key, budget);
+      if (budget.remaining <= 0) break;
     }
     return;
   }
 
   if (value && typeof value === "object") {
-    for (const [nestedKey, nestedValue] of Object.entries(value as Record<string, unknown>)) {
-      collectSearchText(nestedValue, parts, nestedKey);
+    for (const nestedKey in value) {
+      if (!Object.hasOwn(value, nestedKey)) continue;
+      collectSearchText((value as Record<string, unknown>)[nestedKey], parts, nestedKey, budget);
+      if (budget.remaining <= 0) break;
     }
   }
 }
@@ -4589,7 +4532,7 @@ function cleanSearchTextValue(value: string, key: string): string {
 
 function extractNoteSummary(blocks: NoteBlock[]): string {
   const parts: string[] = [];
-  collectSearchText(blocks, parts);
+  collectSearchText(blocks, parts, "", { remaining: NOTE_SUMMARY_MAX_BYTES });
   return truncateUtf8(normalizeSearchText(parts.join(" ")), NOTE_SUMMARY_MAX_BYTES);
 }
 
@@ -4598,20 +4541,16 @@ function normalizeSearchText(value: string): string {
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
-  if (byteLength(value) <= maxBytes) {
-    return value;
-  }
-
-  let result = "";
+  let bytes = 0;
+  let end = 0;
   for (const char of value) {
-    if (byteLength(result + char) > maxBytes) {
-      break;
-    }
-
-    result += char;
+    const point = char.codePointAt(0)!;
+    const width = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    end += char.length;
   }
-
-  return result;
+  return value.slice(0, end);
 }
 
 function createSafeLikePattern(value: string): string | null {
@@ -5519,6 +5458,7 @@ function collectUploadIds(value: unknown, uploadIds: Set<string>): void {
 }
 
 function extractUploadIdFromUrl(value: string): string | null {
+  if (!value.includes("/api/files/") && !value.includes("/api/public/files/")) return null;
   try {
     const url = new URL(value, "https://mini-notes.local");
     const match = /^\/api\/(?:public\/)?files\/([^/]+)$/.exec(url.pathname);
@@ -5946,6 +5886,7 @@ function withCors(response: Response, request: Request): Response {
   // the permissive header for backwards compatibility.
   headers.set("Access-Control-Allow-Origin", origin || "*");
   headers.set("Access-Control-Allow-Credentials", "true");
+  headers.set("Access-Control-Expose-Headers", "X-Request-ID, CF-Ray");
   headers.set("Access-Control-Allow-Headers", "Content-Type");
   headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
   headers.set("Vary", "Origin");
