@@ -1,0 +1,46 @@
+{
+  "runtime": "v24.19.0",
+  "baselineWorkerSha256": "8afd29fca38e3b8a585c5e495c15a891e53936170a8fc3f49cf62cced30763b8",
+  "optimizedWorkerSha256": "ecff6e31c44e52e2acbd6c965813d595a754cdf3a3ce3c1ac1c8828200da9533",
+  "note": "Actual worker functions, synthetic Chinese paragraphs, mocked D1/R2. Local elapsed ms, NOT production Workers CPU; excludes authentication, real I/O and network. 16 paired warm-ups, 13 alternating samples, medians. Save includes request parsing and consuming response bytes. Do not infer a safe document size or eliminate 1102 from these numbers.",
+  "rows": [
+    {
+      "blocks": 100,
+      "jsonKiB": 64.2,
+      "pageLinkHydration": {
+        "beforeMs": 0.172,
+        "afterMs": 0.056,
+        "reductionPercent": 67.7
+      },
+      "publicShareRewrite": {
+        "beforeMs": 0.379,
+        "afterMs": 0.054,
+        "reductionPercent": 85.7
+      },
+      "saveWithMockStorage": {
+        "beforeMs": 2.229,
+        "afterMs": 2.082,
+        "reductionPercent": 6.6
+      }
+    },
+    {
+      "blocks": 1000,
+      "jsonKiB": 643.4,
+      "pageLinkHydration": {
+        "beforeMs": 0.946,
+        "afterMs": 0.549,
+        "reductionPercent": 41.9
+      },
+      "publicShareRewrite": {
+        "beforeMs": 3.719,
+        "afterMs": 0.547,
+        "reductionPercent": 85.3
+      },
+      "saveWithMockStorage": {
+        "beforeMs": 16.566,
+        "afterMs": 14.637,
+        "reductionPercent": 11.6
+      }
+    }
+  ]
+}

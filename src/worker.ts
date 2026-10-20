@@ -2847,7 +2847,7 @@ async function createNote(
 
   await syncNoteIndexes(env, userId, note.id, note.kind, note.title, note.content, note.updatedAt);
 
-  return json(note, 201);
+  return jsonSerialized(serializeNoteWithContent(note, storedContent.serializedContent), 201);
 }
 
 async function updateNote(
@@ -2920,9 +2920,14 @@ async function updateNote(
     updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString()
   };
 
+  let serializedContent: string | undefined;
   if (hasContentUpdate) {
     const storedContent = await persistNoteContent(env, userId, id, next.content, true);
+    serializedContent = storedContent.serializedContent;
     const nextSummary = extractNoteSummary(next.content);
+    // Reuse these sets for indexing, successful cleanup and failed-write cleanup.
+    const previousUploadIds = extractUploadIdsFromBlocks(currentContent);
+    const nextUploadIds = extractUploadIdsFromBlocks(next.content);
     const updateResult = await env.DB.prepare(
       `UPDATE notes
        SET title = ?,
@@ -2967,13 +2972,13 @@ async function updateNote(
       .run()
       .catch(async (cause) => {
         await deleteStaleNoteContent(env, storedContent.contentKey, null);
-        await cleanupRemovedUploadsForUser(env, userId, next.content, currentContent);
+        await cleanupRemovedUploadIdsForUser(env, userId, nextUploadIds, previousUploadIds);
         throw cause;
       });
 
     if (updateResult.meta.changes !== 1) {
       await deleteStaleNoteContent(env, storedContent.contentKey, null);
-      await cleanupRemovedUploadsForUser(env, userId, next.content, currentContent);
+      await cleanupRemovedUploadIdsForUser(env, userId, nextUploadIds, previousUploadIds);
       throw new HttpError("页面已在其他位置更新，请刷新后重试。", 409);
     }
 
@@ -2986,13 +2991,14 @@ async function updateNote(
       next.title,
       next.content,
       next.updatedAt,
-      next.isArchived
+      next.isArchived,
+      nextUploadIds
     );
-    await cleanupRemovedUploadsForUser(
+    await cleanupRemovedUploadIdsForUser(
       env,
       userId,
-      currentContent,
-      next.isArchived ? [] : next.content
+      previousUploadIds,
+      next.isArchived ? new Set<string>() : nextUploadIds
     );
   } else {
     const updateResult = await env.DB.prepare(
@@ -3056,7 +3062,9 @@ async function updateNote(
     }
   }
 
-  return json(next);
+  return serializedContent === undefined
+    ? json(next)
+    : jsonSerialized(serializeNoteWithContent(next, serializedContent));
 }
 
 async function moveNote(
@@ -4137,7 +4145,9 @@ function collectPageLinkNoteIds(value: unknown, noteIds: Set<string>): void {
     }
   }
 
-  Object.values(value).forEach((nestedValue) => collectPageLinkNoteIds(nestedValue, noteIds));
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) collectPageLinkNoteIds(value[key], noteIds);
+  }
 }
 
 async function getPageLinkSummaries(
@@ -4174,17 +4184,30 @@ function hydratePageLinkValue(
   options: PageLinkHydrationOptions
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => hydratePageLinkValue(item, summaries, options));
+    let next: unknown[] | undefined;
+    for (let index = 0; index < value.length; index++) {
+      const item = hydratePageLinkValue(value[index], summaries, options);
+      if (item !== value[index]) {
+        next ??= value.slice();
+        next[index] = item;
+      }
+    }
+    return next ?? value;
   }
 
   if (!isRecord(value)) {
     return value;
   }
 
-  const next: Record<string, unknown> = {};
-  Object.entries(value).forEach(([key, nestedValue]) => {
-    next[key] = hydratePageLinkValue(nestedValue, summaries, options);
-  });
+  let next = value;
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    const nestedValue = hydratePageLinkValue(value[key], summaries, options);
+    if (nestedValue !== value[key]) {
+      if (next === value) next = { ...value };
+      next[key] = nestedValue;
+    }
+  }
 
   if (value.type !== "pageLink" || !isRecord(value.props)) {
     return next;
@@ -4203,6 +4226,11 @@ function hydratePageLinkValue(
   props.publicView = Boolean(options.publicView);
   props.publicRootShareToken = options.publicRootShareToken ?? "";
 
+  const originalProps = value.props;
+  if (Object.keys(props).every((key) => props[key] === originalProps[key]) && next === value) {
+    return value;
+  }
+
   return {
     ...next,
     props
@@ -4219,16 +4247,17 @@ async function persistNoteContent(
   noteId: string,
   blocks: NoteBlock[],
   storeExternally: boolean
-): Promise<{ contentKey: string | null; contentSize: number; dbContent: string }> {
+): Promise<{ contentKey: string | null; contentSize: number; dbContent: string; serializedContent: string }> {
   const dbContent = JSON.stringify(blocks);
-  const contentSize = byteLength(dbContent);
+  const encodedContent = new TextEncoder().encode(dbContent);
+  const contentSize = encodedContent.byteLength;
 
   if (!storeExternally) {
-    return { contentKey: null, contentSize, dbContent };
+    return { contentKey: null, contentSize, dbContent, serializedContent: dbContent };
   }
 
   const contentKey = getNoteContentObjectKey(userId, noteId);
-  await env.FILES.put(contentKey, dbContent, {
+  await env.FILES.put(contentKey, encodedContent, {
     httpMetadata: {
       contentType: "application/json; charset=utf-8"
     }
@@ -4237,7 +4266,8 @@ async function persistNoteContent(
   return {
     contentKey,
     contentSize,
-    dbContent: "[]"
+    dbContent: "[]",
+    serializedContent: dbContent
   };
 }
 
@@ -4268,7 +4298,8 @@ async function syncNoteIndexes(
   title: string,
   content: NoteBlock[],
   updatedAt: string,
-  isArchived = false
+  isArchived = false,
+  uploadIds?: ReadonlySet<string>
 ): Promise<void> {
   if (kind !== "page" || isArchived) {
     await env.DB.prepare("DELETE FROM note_search WHERE note_id = ?")
@@ -4288,16 +4319,17 @@ async function syncNoteIndexes(
     .bind(noteId, userId, title, extractSearchTextFromBlocks(content), updatedAt)
     .run();
 
-  await syncNoteUploadRefs(env, userId, noteId, content);
+  await syncNoteUploadRefs(env, userId, noteId, content, uploadIds);
 }
 
 async function syncNoteUploadRefs(
   env: Env,
   userId: string,
   noteId: string,
-  content: NoteBlock[]
+  content: NoteBlock[],
+  knownUploadIds?: ReadonlySet<string>
 ): Promise<void> {
-  const uploadIds = Array.from(extractUploadIdsFromBlocks(content));
+  const uploadIds = Array.from(knownUploadIds ?? extractUploadIdsFromBlocks(content));
   await env.DB.batch([
     env.DB.prepare("DELETE FROM note_upload_refs WHERE note_id = ?").bind(noteId),
     ...uploadIds.map((uploadId) =>
@@ -5203,6 +5235,15 @@ async function cleanupRemovedUploadsForUser(
 ): Promise<void> {
   const previousUploadIds = extractUploadIdsFromBlocks(previousBlocks);
   const nextUploadIds = extractUploadIdsFromBlocks(nextBlocks);
+  await cleanupRemovedUploadIdsForUser(env, userId, previousUploadIds, nextUploadIds);
+}
+
+async function cleanupRemovedUploadIdsForUser(
+  env: Env,
+  userId: string,
+  previousUploadIds: ReadonlySet<string>,
+  nextUploadIds: ReadonlySet<string>
+): Promise<void> {
   const removedUploadIds = Array.from(previousUploadIds).filter((id) => !nextUploadIds.has(id));
 
   if (removedUploadIds.length === 0) {
@@ -5451,8 +5492,8 @@ function collectUploadIds(value: unknown, uploadIds: Set<string>): void {
   }
 
   if (value && typeof value === "object") {
-    for (const nestedValue of Object.values(value as Record<string, unknown>)) {
-      collectUploadIds(nestedValue, uploadIds);
+    for (const key in value) {
+      if (Object.hasOwn(value, key)) collectUploadIds((value as Record<string, unknown>)[key], uploadIds);
     }
   }
 }
@@ -5479,6 +5520,7 @@ function rewriteBlocksForPublicShare(blocks: NoteBlock[], shareToken: string): N
 
 function rewriteValueForPublicShare(value: unknown, shareToken: string): unknown {
   if (typeof value === "string") {
+    if (!value.includes("/api/files/")) return value;
     return value.replace(
       /\/api\/files\/([a-zA-Z0-9-]{8,80})/g,
       (_match, uploadId: string) => `/api/public/files/${uploadId}?share=${encodeURIComponent(shareToken)}`
@@ -5486,16 +5528,29 @@ function rewriteValueForPublicShare(value: unknown, shareToken: string): unknown
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => rewriteValueForPublicShare(item, shareToken));
+    let next: unknown[] | undefined;
+    for (let index = 0; index < value.length; index++) {
+      const item = rewriteValueForPublicShare(value[index], shareToken);
+      if (item !== value[index]) {
+        next ??= value.slice();
+        next[index] = item;
+      }
+    }
+    return next ?? value;
   }
 
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
-        key,
-        rewriteValueForPublicShare(nestedValue, shareToken)
-      ])
-    );
+    const original = value as Record<string, unknown>;
+    let next = original;
+    for (const key in original) {
+      if (!Object.hasOwn(original, key)) continue;
+      const nestedValue = rewriteValueForPublicShare(original[key], shareToken);
+      if (nestedValue !== original[key]) {
+        if (next === original) next = { ...original };
+        next[key] = nestedValue;
+      }
+    }
+    return next;
   }
 
   return value;
@@ -5849,12 +5904,27 @@ function clearSessionCookie(request: Request): string {
   ].join("; ");
 }
 
+// Only accepts the JSON produced by persistNoteContent in this request.
+// Reuse it verbatim to avoid serializing the full body again for the save response.
+function serializeNoteWithContent(note: Note, serializedContent: string): string {
+  const metadata = JSON.stringify({ ...note, content: undefined });
+  return `${metadata.slice(0, -1)},"content":${serializedContent}}`;
+}
+
 function json(
   data: unknown,
   status = 200,
   extraHeaders: HeadersInit = {}
 ): Response {
-  return new Response(JSON.stringify(data), {
+  return jsonSerialized(JSON.stringify(data), status, extraHeaders);
+}
+
+function jsonSerialized(
+  serialized: string,
+  status = 200,
+  extraHeaders: HeadersInit = {}
+): Response {
+  return new Response(serialized, {
     status,
     headers: {
       ...corsHeaders(),

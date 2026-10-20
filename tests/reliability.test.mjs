@@ -21,7 +21,7 @@ function load(file, extra = "") {
     load(resolve(dirname(file), `${specifier}.ts`)), module, module.exports);
   return module.exports;
 }
-const worker = load(resolve(root, "src/worker.ts"), `\nexport { truncateUtf8, extractNoteSummary, extractSearchTextFromBlocks, extractUploadIdFromUrl, materializeEmbeddedUploads, readNoteContent, listNotes, updateNote };`);
+const worker = load(resolve(root, "src/worker.ts"), `\nexport { truncateUtf8, extractNoteSummary, extractSearchTextFromBlocks, extractUploadIdFromUrl, materializeEmbeddedUploads, readNoteContent, listNotes, createNote, updateNote, hydratePageLinkValue, rewriteValueForPublicShare, persistNoteContent, serializeNoteWithContent };`);
 const drafts = load(resolve(root, "src/localDrafts.ts"));
 const textBlocks = (text) => [{ type: "paragraph", content: [{ type: "text", text }] }];
 
@@ -113,6 +113,7 @@ test("content save persists R2, guards concurrent DB updates and updates attachm
   const { env, calls } = environment();
   const response = await worker.updateNote(patchRequest({ content: textBlocks("new"), expectedUpdatedAt: row().updatedAt }), env, "user", "note-one");
   assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).content, textBlocks("new"));
   const update = calls.find(([operation, sql]) => operation === "run" && sql.startsWith("UPDATE notes"));
   assert.equal(update[2].at(-1), row().updatedAt);
   assert.ok(calls.some(([operation]) => operation === "put"));
@@ -121,6 +122,102 @@ test("content save persists R2, guards concurrent DB updates and updates attachm
   await assert.rejects(worker.updateNote(patchRequest({ content: textBlocks("new") }), raced.env, "user", "note-one"), { status: 409 });
   assert.ok(raced.calls.some(([operation]) => operation === "delete"));
   assert.ok(!raced.calls.some(([operation]) => operation === "batch"));
+});
+
+test("saved content is serialized once and R2 bytes match the complete JSON response", async () => {
+  const { env, calls } = environment();
+  let serializations = 0;
+  const content = [{ toJSON() { serializations++; return { text: '中文😀\\\"\n</script>', props: { nested: [null, true, 1] } }; } }];
+  const persisted = await worker.persistNoteContent(env, "user", "note-one", content, true);
+  const saved = { ...note(), title: '标题\\\"\n😀', content };
+  const responseJson = worker.serializeNoteWithContent(saved, persisted.serializedContent);
+  assert.equal(serializations, 1);
+  const expectedContent = JSON.parse(persisted.serializedContent);
+  assert.deepEqual(JSON.parse(responseJson), { ...saved, content: expectedContent });
+  const encoded = calls.find(([operation]) => operation === "put")[2];
+  assert.ok(encoded instanceof Uint8Array);
+  assert.equal(encoded.byteLength, persisted.contentSize);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(encoded)), expectedContent);
+  const created = await worker.createNote(new Request("https://test/api/notes", {
+    method: "POST", body: JSON.stringify({ title: "新页面", content: expectedContent })
+  }), env, "user");
+  assert.equal(created.status, 201);
+  assert.deepEqual((await created.json()).content, expectedContent);
+  assert.match(created.headers.get("Content-Type"), /application\/json/);
+  assert.equal(created.headers.get("Cache-Control"), "no-store");
+});
+
+function freezeTree(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeTree);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+test("page-link hydration preserves unrelated branches and all nested link behavior without mutation", () => {
+  const ordinary = textBlocks("正文")[0];
+  const link = { type: "pageLink", props: { noteId: " linked ", title: "old", icon: "old", shareToken: "old", extra: 7 }, children: [] };
+  const missing = { type: "pageLink", props: { noteId: "missing", title: "kept", shareToken: "kept" } };
+  const content = freezeTree([ordinary, { type: "paragraph", children: [link, missing] }]);
+  const summaries = new Map([["linked", { title: "new", icon: "📄", shareToken: null }]]);
+  const hydrated = worker.hydratePageLinkValue(content, summaries, { publicView: true, publicRootShareToken: "root" });
+  assert.equal(hydrated[0], ordinary);
+  assert.notEqual(hydrated[1], content[1]);
+  assert.deepEqual(hydrated[1].children[0].props, { ...link.props, title: "new", icon: "📄", shareToken: "", publicView: true, publicRootShareToken: "root" });
+  assert.deepEqual(hydrated[1].children[1].props, { ...missing.props, publicView: true, publicRootShareToken: "root" });
+  assert.equal(worker.hydratePageLinkValue(hydrated, summaries, { publicView: true, publicRootShareToken: "root" }), hydrated);
+  const privateContent = worker.hydratePageLinkValue(hydrated, summaries, {});
+  assert.equal(privateContent[1].children[0].props.publicView, false);
+  assert.equal(privateContent[1].children[0].props.publicRootShareToken, "");
+});
+
+test("public sharing rewrites every nested private file URL while preserving ordinary branches", () => {
+  const ordinary = textBlocks("普通文本")[0];
+  const content = freezeTree([ordinary, { props: { url: "/api/files/abcd-1234" }, children: [
+    { text: "https://test/api/files/other-5678 /api/files/abcd-1234", number: 1, absent: null }
+  ] }]);
+  const rewritten = worker.rewriteValueForPublicShare(content, "a b&");
+  assert.equal(rewritten[0], ordinary);
+  assert.equal(rewritten[1].props.url, "/api/public/files/abcd-1234?share=a%20b%26");
+  assert.equal(rewritten[1].children[0].text, "https://test/api/public/files/other-5678?share=a%20b%26 /api/public/files/abcd-1234?share=a%20b%26");
+  assert.equal(rewritten[1].children[0].number, 1);
+  assert.equal(rewritten[1].children[0].absent, null);
+  assert.equal(worker.rewriteValueForPublicShare(rewritten, "a b&"), rewritten);
+  assert.equal(worker.rewriteValueForPublicShare([ordinary], "root")[0], ordinary);
+});
+
+test("attachment cleanup keeps retained/shared files, follows ref updates and reverses direction on a failed write", async () => {
+  const previous = [{ url: "/api/files/keep-1234", children: [{ url: "/api/files/remove-1234" }, { url: "/api/files/shared-1234" }] }];
+  const content = [{ url: "/api/files/keep-1234", children: [{ url: "/api/files/added-1234" }] }];
+  for (const changes of [1, 0]) {
+    const { env, calls } = environment({ ...row(), content: JSON.stringify(previous) }, changes);
+    const prepare = env.DB.prepare;
+    env.DB.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (!sql.includes("FROM notes")) statement.first = async () => {
+        calls.push(["lookup", sql, statement.values]);
+        const id = statement.values.find((value) => typeof value === "string" && /^(remove|shared|added)-1234$/.test(value));
+        if (sql.includes("FROM note_upload_refs")) return id === "shared-1234" ? { noteId: "other" } : null;
+        if (sql.includes("FROM uploads")) return { objectKey: `upload/${id}` };
+        return null;
+      };
+      else {
+        const first = statement.first;
+        statement.first = async () => sql.includes("content LIKE") ? null : first();
+      }
+      return statement;
+    };
+    const save = worker.updateNote(patchRequest({ content }), env, "user", "note-one");
+    if (changes) await save; else await assert.rejects(save, { status: 409 });
+    const deleted = calls.filter(([operation, key]) => operation === "delete" && key.startsWith("upload/"));
+    assert.deepEqual(deleted.map(([, key]) => key), [changes ? "upload/remove-1234" : "upload/added-1234"]);
+    if (changes) {
+      const refBatch = calls.find(([operation]) => operation === "batch");
+      assert.deepEqual(refBatch[1].slice(1).map((statement) => statement.values[2]), ["keep-1234", "added-1234"]);
+      assert.ok(calls.indexOf(refBatch) < calls.indexOf(deleted[0]));
+    }
+  }
 });
 
 function storage() {
