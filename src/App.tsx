@@ -77,6 +77,7 @@ import {
 import { collectNoteComments } from "./comments";
 import { lastLocalDraftId, readLocalDraft, removeLocalDraft, retryableSaveStatus, sameEditableNote, writeLocalDraft } from "./localDrafts";
 import { NoteIcon } from "./components/NoteIcon";
+import { NotesOverviewGrid } from "./components/NotesOverviewGrid";
 import { isImageIcon, type EmojiItem } from "./emojiPacks";
 import { openExportWindow } from "./exportWindow";
 import type {
@@ -2014,12 +2015,13 @@ function App() {
       kind: NoteSummary["kind"],
       parentId: string | null,
       beforeId: string | null,
-      draggedId: string
+      draggedId: string,
+      allKinds = false
     ): number => {
       const targetGroup = [...notesRef.current]
         .filter(
           (record) =>
-            record.kind === kind &&
+            (allKinds || record.kind === kind) &&
             record.id !== draggedId &&
             (record.parentId ?? null) === parentId
         )
@@ -2071,7 +2073,7 @@ function App() {
   );
 
   const queueRecordMove = useCallback(
-    (noteId: string, parentId: string | null, beforeId: string | null) => {
+    (noteId: string, parentId: string | null, beforeId: string | null, allKinds = false) => {
       const currentNotes = notesRef.current;
       const draggedNote = currentNotes.find((note) => note.id === noteId);
       if (!draggedNote || noteId === beforeId) {
@@ -2098,7 +2100,7 @@ function App() {
       const currentSiblings = [...currentNotes]
         .filter(
           (note) =>
-            note.kind === draggedNote.kind &&
+            (allKinds || note.kind === draggedNote.kind) &&
             (note.parentId ?? null) === (draggedNote.parentId ?? null)
         )
         .sort(compareNoteOrder);
@@ -2112,7 +2114,8 @@ function App() {
         draggedNote.kind,
         parentId,
         beforeId,
-        noteId
+        noteId,
+        allKinds
       );
       const optimisticUpdatedAt = new Date().toISOString();
       applyNotePositionLocally(noteId, parentId, nextSortOrder, optimisticUpdatedAt);
@@ -5324,49 +5327,23 @@ function App() {
             </header>
 
             {overviewCategories.length > 0 || overviewPages.length > 0 ? (
-              <div className="notes-overview__grid">
-                {overviewCategories.map((category) => {
-                  const childCount =
-                    (categoriesByParent.get(category.id)?.length ?? 0) +
-                    (allPagesByParent.get(category.id)?.length ?? 0);
-
-                  return (
-                    <button
-                      className="notes-overview-card category"
-                      key={category.id}
-                      onClick={() => openNotesOverview(category.id)}
-                      type="button"
-                    >
-                      <span className="notes-overview-card__icon">
-                        <Folder size={20} />
-                      </span>
-                      <span className="notes-overview-card__copy">
-                        <strong>{category.title || "未命名分类"}</strong>
-                        <small>{childCount > 0 ? `${childCount} 个项目` : "空分类"}</small>
-                      </span>
-                      <ArrowRight className="notes-overview-card__arrow" size={17} />
-                    </button>
-                  );
-                })}
-
-                {overviewPages.map((note) => (
-                  <button
-                    className="notes-overview-card page-link"
-                    key={note.id}
-                    onClick={() => void selectNote(note.id)}
-                    type="button"
-                  >
-                    <span className="notes-overview-card__icon page-icon">
-                      <NoteIcon icon={normalizePageIcon(note.icon)} />
-                    </span>
-                    <span className="notes-overview-card__copy">
-                      <strong>{note.title || "未命名"}</strong>
-                      <small>{formatRelative(note.updatedAt)}</small>
-                    </span>
-                    <ArrowRight className="notes-overview-card__arrow" size={17} />
-                  </button>
-                ))}
-              </div>
+              <NotesOverviewGrid
+                key={overviewParentId ?? "root"}
+                records={[...overviewCategories, ...overviewPages].sort(compareNoteOrder)}
+                onOpen={(record) => {
+                  if (record.kind === "category") openNotesOverview(record.id);
+                  else void selectNote(record.id);
+                }}
+                onMove={(id, beforeId) => queueRecordMove(id, overviewParentId, beforeId, true)}
+                renderIcon={(record) => record.kind === "category"
+                  ? <Folder size={20} />
+                  : <NoteIcon icon={normalizePageIcon(record.icon)} />}
+                describe={(record) => {
+                  if (record.kind === "page") return formatRelative(record.updatedAt);
+                  const count = (categoriesByParent.get(record.id)?.length ?? 0) + (allPagesByParent.get(record.id)?.length ?? 0);
+                  return count > 0 ? `${count} 个项目` : "空分类";
+                }}
+              />
             ) : (
               <div className="notes-overview__empty">
                 <span className="notes-overview__empty-icon">
