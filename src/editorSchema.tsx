@@ -15,6 +15,7 @@ import { formatBibleReference, parseBibleVersePayload } from "./bible";
 import { apiUrl } from "./apiBase";
 import { parseNoteComment } from "./comments";
 import { MindElixirMindMap } from "./components/MindElixirMindMap";
+import { toggleListItem } from "./toggleListItem";
 
 const FONT_SIZE_VALUES = new Set(["12px", "14px", "16px", "18px", "20px", "24px", "28px", "32px"]);
 export const COLLAPSIBLE_CONTENT_DEFAULT_TITLE = "这是标题可以自定义";
@@ -1411,6 +1412,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export const noteSchema = BlockNoteSchema.create({
   blockSpecs: {
     ...defaultBlockSpecs,
+    toggleListItem,
     collapsibleContent,
     bibleVerseCard,
     contentTimeline: timelineBlock,

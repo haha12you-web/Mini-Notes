@@ -25,6 +25,7 @@
     "src/comments.ts",
     "src/emojiPacks.ts",
     "src/editorSchema.tsx",
+    "src/toggleListItem.ts",
     "src/imageClipboard.ts",
     "src/localDrafts.ts",
     "src/main.tsx",

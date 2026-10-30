@@ -2783,6 +2783,52 @@ button.collapsible-content-block__toggle:hover {
 }
 
 @media (max-width: 760px) {
+  .bn-editor {
+    --mobile-toggle-target: 44px;
+    --mobile-block-indent: 18px;
+  }
+
+  .bn-editor .bn-block-content > div:has(> .bn-toggle-wrapper) {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .bn-editor .bn-toggle-wrapper {
+    align-items: flex-start;
+    min-width: 0;
+  }
+
+  .bn-editor .bn-toggle-wrapper > .bn-inline-content {
+    flex: 1;
+    min-width: 0;
+    padding-block: 8px;
+    overflow-wrap: anywhere;
+  }
+
+  .bn-editor .bn-toggle-button {
+    width: var(--mobile-toggle-target);
+    height: var(--mobile-toggle-target);
+    min-width: var(--mobile-toggle-target);
+    min-height: var(--mobile-toggle-target);
+    flex: 0 0 var(--mobile-toggle-target);
+    margin-left: -10px;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    touch-action: manipulation;
+  }
+
+  .bn-editor .bn-block-group .bn-block-group {
+    margin-left: var(--mobile-block-indent);
+  }
+
+  .bn-editor .bn-toggle-add-block-button {
+    min-height: var(--mobile-toggle-target);
+    align-items: center;
+    white-space: normal;
+    text-align: left;
+  }
+
   .page-category-select {
     width: 100%;
   }
